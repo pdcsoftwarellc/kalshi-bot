@@ -5,6 +5,7 @@ A live tennis trading bot that predicts match win probabilities in real time usi
 The research workflow can download ATP singles history from API-Tennis, train a
 point model, and score held-out matches. Trading replay additionally requires
 timestamped predictions, Kalshi quotes with depth, and exchange settlements.
+The [research guide](research/README.md) links the experiments, results, and replay commands.
 
 ---
 
@@ -135,9 +136,10 @@ to the same environment; demo execution uses `DEMO_KALSHI_API_KEY` and
 
 The project-root `.env` loads regardless of the working directory. Existing shell
 environment variables take precedence. Relative data/key paths resolve from the
-project root. The example uses `data/paper-trading.db` to separate new paper runs
-from the historical `data/trading.db` already in the repository. The portal can
-persist threshold overrides in its database, which take precedence on restart.
+project root. The bot creates its SQLite database on first run. The example
+uses `data/paper-trading.db` for paper trades. Local databases are ignored by Git.
+The portal can persist threshold overrides in its database, which take precedence
+on restart.
 
 Run the read-only checks before starting:
 

@@ -1,5 +1,7 @@
 # Testing the monthly API cost
 
+The experiment reports are versioned alongside the code. Raw recordings, API response caches, fitted models, and generated ledgers are local files. Replay examples with dated capture IDs require those local inputs.
+
 Run the historical ATP experiment from the repository root. Results and individual order and fill records are saved under `data/processed/api-cost-research/`. The source requests are cached in `data/raw/cost-research-v1/`. The current cache reproduces the November 17, 2026 snapshot offline. A new download after archival will require routing requests to Kalshi's historical endpoints.
 
 ```sh

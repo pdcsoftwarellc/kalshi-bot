@@ -35,14 +35,14 @@ The model is a three-layer stack:
 | **GBDT (XGBoost)** | Predicts P(server wins point) from pre-match + in-play features | `tennis/model.py` |
 | **BayesianUpdater** | Beta-Binomial conjugate update of p_serve after each observed point | `tennis/updater.py` |
 | **Markov chain** | Propagates p_serve analytically through game → set → match (Newton & Keller 2005) | `tennis/markov.py` |
-| **Calibrator** | Isotonic regression to correct match-level probability bias | `tennis/calibration.py` |
+| **Calibrator** | Symmetric odds calibration fitted on validation match states | `tennis/calibration.py` |
 
-The GBDT prior initialises the Bayesian updater at match start. As points are observed the posterior mean shifts toward the player's actual in-match serve rate, with an optional exponential decay (`decay_rate`) that gives more weight to recent points.
+At match start the GBDT estimates a separate service prior for each player. Each observed point updates only the player who served it. Paired posterior draws propagate uncertainty through the actual score and service order.
 
 ### Features
 
 Pre-match features (computed once per match):
-- Surface-specific ELO ratings
+- Surface-specific Elo with an all-surface fallback when history is missing
 - Rolling serve/return win % (last 52 weeks)
 - Head-to-head record
 - Tournament level, surface, ranking difference
@@ -174,9 +174,33 @@ The importer includes finished ATP singles matches with consistent point, game,
 set and match scores. It reports exclusions. Missing player history falls back
 to tour averages. For unfamiliar tournaments without surface information the
 surface features remain unknown. API-Tennis player IDs belong to a different
-namespace from ATP IDs used by the live player resolver. This sample model is
-stored in a research subdirectory and requires an ID mapping for live inference.
+namespace from ATP IDs. Newly trained artifacts identify their source so the tracker can use provider keys directly. Older artifacts use the ATP name resolver.
 Use a longer history and a new, untouched test period for strategy selection.
+
+### Native model research run
+
+The November 2026 native-model experiment uses complete ATP singles fixtures from
+July 1 to October 15. Training ends August 31, validation ends September 20,
+and the chronological test starts September 22. Set `ARTIFACTS_DIR=data/artifacts/native-atp`
+in the shell to select this model for a local paper run or an environment check.
+
+```sh
+python scripts/download_data.py --source api-tennis --start 2026-07-01 --end 2026-10-15 --fixtures-dir data/raw/native-atp
+python scripts/build_features.py --fixtures-dir data/raw/native-atp --train-before 2026-09-01 --test-from 2026-09-22 --out-dir data/processed/native-atp --artifacts-dir data/artifacts/native-atp
+python scripts/train.py --processed-dir data/processed/native-atp --artifacts-dir data/artifacts/native-atp
+python scripts/backtest.py --test-data data/processed/native-atp/features_test.parquet --artifacts-dir data/artifacts/native-atp --plots-dir data/processed/native-atp/evaluation --latency-samples 40
+python research/model_market_audit.py --artifacts-dir data/artifacts/native-atp --out-dir data/processed/native-atp/market-audit
+python research/native_replay.py data/raw/first-break-challenger/*.jsonl
+```
+
+The market audit uses the previously cached ATP cohort. The tape replay runs
+the native feed, tracker and prediction engine in receipt order and passes their
+YES-oriented predictions and sized quotes into the fee-and-fill replay. Each
+recording starts a separate cash ledger. `--settle` retrieves published payouts
+for forecasted markets. Full native payloads are present in new recordings.
+Older enriched Challenger tapes support first-set snapshots with complete point
+logs. An empty or unpriced book, a recording gap or an incomplete score history
+limits coverage.
 
 ### Trading replay
 
@@ -298,7 +322,7 @@ credentials are needed for demo execution.
 
 **No GBDT/updater blending.** An earlier design blended the GBDT estimate and the Bayesian posterior at 20 points. This was removed — the updater already handles the prior-to-data transition cleanly through its Beta-Binomial parameterisation.
 
-**Leakage-free calibration.** The isotonic calibrator is fitted on actual match winners (`match_winner` from ATP/slam metadata), not on `server_won.mean() > 0.5` which is derivable from training features. The validation set is split temporally: H1 for GBDT early stopping, H2 for calibrator fitting.
+**In-play calibration.** The first validation dates select the GBDT stopping point. The later dates fit an odds slope to opening and every tenth pre-point match state. Each match has the same total weight. Player-swap symmetry and a weak penalty towards identity preserve sensible behavior between observed scores. The backtest reports raw, calibrated and score-only errors on later matches.
 
 **Server identity.** Main-tour point histories encode game, set, and tiebreak service boundaries. The feature builder preserves those boundaries and computes each row from the score before its target point.
 

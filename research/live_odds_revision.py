@@ -83,6 +83,81 @@ def verified_set(row, score):
         return None
 
 
+async def odds_loop(emit, matches, tour, point_mode, score_lifecycle=None):
+    async with httpx.AsyncClient(timeout=8) as client:
+        while True:
+            if score_lifecycle is not None and not matches:
+                await asyncio.sleep(1)
+                continue
+            started = time.monotonic()
+            try:
+                async def read(method):
+                    resp=await client.get(config.API_TENNIS_REST,params=dict(method=method,
+                        APIkey=config.API_TENNIS_KEY,event_type_key=TOURS[tour][1],timezone="UTC"))
+                    received=time.time_ns()
+                    resp.raise_for_status()
+                    payload=resp.json()
+                    if str(payload.get("success"))!="1":
+                        raise ValueError("Unsuccessful provider response")
+                    return received,payload.get("result") or {}
+                scores={}
+                if point_mode:
+                    (odds_at,response),(scores_at,score_rows)=await asyncio.gather(
+                        read("get_live_odds"),read("get_livescore"))
+                    for sr in score_rows if isinstance(score_rows,list) else score_rows.values():
+                        ident=str(sr.get("event_key"))
+                        if ident in matches:
+                            scores[ident]=dict(receipt_utc_ns=scores_at,**{k:sr.get(k) for k in
+                                ("event_status","event_live","event_winner","event_game_result",
+                                 "event_serve","event_final_result","scores","first_player_key","second_player_key")})
+                else:
+                    odds_at,response=await read("get_live_odds")
+                items = response.values() if isinstance(response,dict) else response
+                sample={}
+                for m in items:
+                    key=str(m["event_key"])
+                    if key in matches:
+                        sample[key]={name:m.get(name) for name in
+                                     ("event_status","event_winner","event_game_result","event_serve",
+                                      "event_final_result","first_player_key","second_player_key")}
+                        sample[key]["odds_receipt_utc_ns"]=odds_at
+                        if point_mode:
+                            sample[key]["score_verification"]=scores.get(key)
+                        sample[key]["lines"]=[{k:r.get(k) for k in
+                            ("odd_name","type","value","suspended","upd","handicap")}
+                            for r in (m.get("live_odds") or []) if r.get("odd_name")=="To Win"]
+                if score_lifecycle is not None:
+                    score_lifecycle(scores)
+                emit("odds",sample)
+            except (httpx.HTTPError,ValueError,TypeError,KeyError):
+                emit("odds_error",{})
+            await asyncio.sleep(max(0,5-(time.monotonic()-started)))
+
+async def book_stream(emit, tickers):
+    signer=KalshiClient(config.KALSHI_API_KEY,config.KALSHI_PRIVATE_KEY_PATH,demo=False)
+    headers=signer._auth_headers("GET",urlsplit(config.KALSHI_WS_PROD).path)
+    async with websockets.connect(config.KALSHI_WS_PROD,additional_headers=headers) as ws:
+        await ws.send(json.dumps(dict(id=1,cmd="subscribe",params=dict(
+            channels=["orderbook_delta"],market_tickers=list(tickers),
+            use_yes_price=False))))
+        first_book = True
+        deadline = asyncio.get_running_loop().time() + 15
+        while True:
+            if first_book:
+                async with asyncio.timeout_at(deadline):
+                    raw = await ws.recv()
+            else:
+                raw = await ws.recv()
+            frame=json.loads(raw)
+            kind=frame["type"]
+            if kind=="error":
+                raise RuntimeError("Book subscription rejected")
+            if kind in ("orderbook_snapshot","orderbook_delta"):
+                first_book=False
+                safe=("market_ticker","side","price_dollars","delta_fp","yes_dollars_fp","no_dollars_fp","clock","ts_ms")
+                emit(kind,dict(seq=frame["seq"],sid=frame["sid"],**{k:v for k,v in frame["msg"].items() if k in safe}))
+
+
 async def capture(path, matches, tour, seconds, point_mode=False):
     with path.open("x", buffering=1) as stream:
         def emit(kind,data):
@@ -90,68 +165,8 @@ async def capture(path, matches, tour, seconds, point_mode=False):
                                      "data":data},separators=(",",":"))+"\n")
 
         emit("start",{"matches":matches,"tour":tour,"seconds":seconds,"point_mode":point_mode,"rule":POINT_RULE if point_mode else RULE})
-        async def odds():
-            async with httpx.AsyncClient(timeout=8) as client:
-                while True:
-                    started = time.monotonic()
-                    try:
-                        async def read(method):
-                            resp=await client.get(config.API_TENNIS_REST,params=dict(method=method,
-                                APIkey=config.API_TENNIS_KEY,event_type_key=TOURS[tour][1],timezone="UTC"))
-                            received=time.time_ns()
-                            resp.raise_for_status()
-                            payload=resp.json()
-                            if str(payload.get("success"))!="1":
-                                raise ValueError("Unsuccessful provider response")
-                            return received,payload.get("result") or {}
-                        scores={}
-                        if point_mode:
-                            (odds_at,response),(scores_at,score_rows)=await asyncio.gather(
-                                read("get_live_odds"),read("get_livescore"))
-                            for sr in score_rows if isinstance(score_rows,list) else score_rows.values():
-                                ident=str(sr.get("event_key"))
-                                if ident in matches:
-                                    scores[ident]=dict(receipt_utc_ns=scores_at,**{k:sr.get(k) for k in
-                                        ("event_status","event_live","event_winner","event_game_result",
-                                         "event_serve","event_final_result","scores","first_player_key","second_player_key")})
-                        else:
-                            odds_at,response=await read("get_live_odds")
-                        items = response.values() if isinstance(response,dict) else response
-                        sample={}
-                        for m in items:
-                            key=str(m["event_key"])
-                            if key in matches:
-                                sample[key]={name:m.get(name) for name in
-                                             ("event_status","event_winner","event_game_result","event_serve",
-                                              "event_final_result","first_player_key","second_player_key")}
-                                sample[key]["odds_receipt_utc_ns"]=odds_at
-                                if point_mode:
-                                    sample[key]["score_verification"]=scores.get(key)
-                                sample[key]["lines"]=[{k:r.get(k) for k in
-                                    ("odd_name","type","value","suspended","upd","handicap")}
-                                    for r in (m.get("live_odds") or []) if r.get("odd_name")=="To Win"]
-                        emit("odds",sample)
-                    except (httpx.HTTPError,ValueError,TypeError,KeyError):
-                        emit("odds_error",{})
-                    await asyncio.sleep(max(0,5-(time.monotonic()-started)))
-
-        async def books():
-            signer=KalshiClient(config.KALSHI_API_KEY,config.KALSHI_PRIVATE_KEY_PATH,demo=False)
-            headers=signer._auth_headers("GET",urlsplit(config.KALSHI_WS_PROD).path)
-            async with websockets.connect(config.KALSHI_WS_PROD,additional_headers=headers) as ws:
-                await ws.send(json.dumps(dict(id=1,cmd="subscribe",params=dict(
-                    channels=["orderbook_delta"],market_tickers=[m["ticker"] for m in matches.values()],
-                    use_yes_price=False))))
-                async for raw in ws:
-                    frame=json.loads(raw)
-                    kind=frame["type"]
-                    if kind=="error":
-                        raise RuntimeError("Book subscription rejected")
-                    if kind in ("orderbook_snapshot","orderbook_delta"):
-                        safe=("market_ticker","side","price_dollars","delta_fp","yes_dollars_fp","no_dollars_fp","clock","ts_ms")
-                        emit(kind,dict(seq=frame["seq"],sid=frame["sid"],**{k:v for k,v in frame["msg"].items() if k in safe}))
-
-        tasks=[asyncio.create_task(fn()) for fn in (odds,books)]
+        tasks=[asyncio.create_task(odds_loop(emit, matches, tour, point_mode)),
+               asyncio.create_task(book_stream(emit, [m["ticker"] for m in matches.values()]))]
         normal=False
         try:
             done,_=await asyncio.wait(tasks,timeout=seconds,return_when=asyncio.FIRST_COMPLETED)
@@ -222,6 +237,7 @@ def replay(frames):
     books=Books()
     counts=Counter()
     by_fixture={}
+    enrolled=set()
     quoted,live,revision_fixtures=set(),set(),set()
     previous={}
     open_by_fixture={}
@@ -246,7 +262,9 @@ def replay(frames):
                     del open_by_fixture[key]
                     continue
                 price=D(row["limit"])
-                row.update(state="holding",buy=str(price),entry_fee=str(fee(price)),
+                opposite = "no" if row["side"] == "yes" else "yes"
+                depth = books.levels[row["ticker"]][opposite][1-ask]
+                row.update(state="holding",buy=str(price),entry_fee=str(fee(price)),entry_size=str(depth),
                            entry_utc_ns=row["signal_utc_ns"]+2*SECOND,due_mono=at+30*SECOND)
             if row["state"]=="holding" and row["due_mono"]<=until:
                 bid=sized_bid(books,row["ticker"],row["side"],row["due_mono"])
@@ -256,9 +274,26 @@ def replay(frames):
                     total_fee=D(row["entry_fee"])+fee(bid)
                     net=bid-D(row["buy"])-total_fee
                     row.update(state="closed",sell=str(bid),fees=str(total_fee),net=str(net),
+                               exit_size=str(books.levels[row["ticker"]][row["side"]][bid]),
                                exit_utc_ns=row["entry_utc_ns"]+30*SECOND)
                     cash += net
                     del open_by_fixture[key]
+
+    def interrupt(keys, reason, book_gap=True):
+        for key in keys:
+            previous.pop(key, None)
+            if book_gap and key in by_fixture:
+                ticker = by_fixture[key]["ticker"]
+                books.levels.pop(ticker, None)
+                books.updated.pop(ticker, None)
+            order = open_by_fixture.get(key)
+            if order and order["state"] == "awaiting_entry":
+                # We cannot verify whether the pending entry filled during a book gap.
+                order.update(state="entry_unknown" if book_gap else "intervening_odds_unusable", interruption=reason)
+                if not book_gap:
+                    del open_by_fixture[key]
+            elif book_gap and order and order["state"] == "holding":
+                order.update(state="unpriced_exit", interruption=reason)
 
     for frame in frames:
         kind,now,utc,m=frame["kind"],frame["mono_ns"],frame["utc_ns"],frame["data"]
@@ -268,8 +303,23 @@ def replay(frames):
         work(now-1)
         if kind=="start":
             first=utc
-            by_fixture=m["matches"]
+            by_fixture=dict(m["matches"])
+            enrolled.update(by_fixture)
             point_mode=m.get("point_mode",False)
+        elif kind=="enroll":
+            by_fixture[m["fixture"]] = m["meta"]
+            enrolled.add(m["fixture"])
+        elif kind=="invalidate":
+            keys = list(by_fixture) if m.get("fixture") is None else [m["fixture"]]
+            interrupt(keys, m["reason"], m.get("channel") != "odds")
+        elif kind=="terminal":
+            key = m["fixture"]
+            pending = open_by_fixture.get(key)
+            if pending and pending["state"] == "awaiting_entry":
+                pending["state"] = "entry_canceled_terminal"
+                del open_by_fixture[key]
+            interrupt([key], "terminal")
+            by_fixture.pop(key, None)
         elif kind in ("orderbook_snapshot","orderbook_delta"):
             books.apply(kind,m,now)
             counts[kind]+=1
@@ -347,16 +397,16 @@ def replay(frames):
         if order["state"]=="holding":order["state"]="open_at_end"
         if order["state"]=="awaiting_entry":order["state"]="incomplete_entry_window"
     closed=[r for r in ledger if r["state"]=="closed"]
-    unresolved=[r for r in ledger if r["state"] in ("open_at_end","unpriced_exit")]
+    unresolved=[r for r in ledger if r["state"] in ("open_at_end","unpriced_exit","entry_unknown")]
     fees=sum((D(r["fees"]) for r in closed),D(0))
     net=sum((D(r["net"]) for r in closed),D(0))
-    return dict(rule=POINT_RULE if point_mode else RULE, started_utc_ns=first,ended_utc_ns=finish, linked=len(by_fixture),
+    return dict(rule=POINT_RULE if point_mode else RULE, started_utc_ns=first,ended_utc_ns=finish, linked=len(enrolled),
                 live_matches=len(live),priced_matches=len(quoted),revision_matches=len(revision_fixtures),
                 matches={"live":sorted(live),"priced":sorted(quoted),"revision":sorted(revision_fixtures)},
                 coverage=dict(counts),max_any_price_change=str(max_change),max_same_context_price_change=str(max_same_change),
                 revisions=revisions,revision_count=len(revisions),qualified=len(ledger),
                 entered=sum("buy" in r for r in ledger),closed=len(closed),unresolved=len(unresolved),
-                unresolved_cost=str(sum((D(r["buy"])+D(r["entry_fee"]) for r in unresolved),D(0))),
+                unresolved_cost=str(sum((D(r["limit"])+fee(D(r["limit"])) for r in unresolved),D(0))),
                 net_closed_dollars=str(net),fees_closed_dollars=str(fees),ledger=ledger,
                 limit="Single vendor, source update timezone and retirement equivalence unverified. Suspensions between polls are unobserved. Book depth is a fill approximation.")
 

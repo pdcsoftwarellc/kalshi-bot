@@ -23,11 +23,14 @@ OUT = ROOT / "data/raw/first-break"
 TOURS = {"atp": (SERIES, 265), "challenger": ("KXATPCHALLENGERMATCH", 281)}
 
 
-def discover(client, tour="atp"):
+def discover(client, tour="atp", *, fixture_statuses=None):
     series, event_type = TOURS[tour]
     today = datetime.now(UTC).date()
     fixtures = tennis(client, "get_fixtures", date_start=str(today-timedelta(days=1)),
                       date_stop=str(today+timedelta(days=3)), timezone="UTC", event_type_key=event_type)
+    if fixture_statuses is not None:
+        for fixture in fixtures:
+            fixture_statuses[str(fixture["event_key"])] = fixture.get("event_status") or ""
     pairs = defaultdict(list)
     cursor = ""
     while True:
@@ -59,6 +62,7 @@ def discover(client, tour="atp"):
             already_in_play=str(f.get("event_live"))=="1" or bool(f.get("pointbypoint")) or bool(f.get("scores") and f.get("event_status") in ("Set 1","Set 2","Set 3","Set 4","Set 5")),
 
             player1=f["event_first_player"], player2=f["event_second_player"],
+            first_player_key=str(f.get("first_player_key") or ""), second_player_key=str(f.get("second_player_key") or ""),
             yes_player=1 if str(f["first_player_key"]) == yes_id else 2,
             open_ts=max(timestamp(x["open_time"]) for x in pair),
             fixture_start=f['event_date']+"T"+f['event_time']+"+00:00",

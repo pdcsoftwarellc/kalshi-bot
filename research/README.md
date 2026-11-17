@@ -125,3 +125,29 @@ Outputs live under `data/processed/native-atp/market-anchor/` and
 `data/processed/native-atp/score-feed-markout/`.
 
 The [third batch](parallel-round3.md) tests bookmaker revisions, deciding-set prices, first-set point dominance, routing between player contracts, and a separately recorded point-confirmed odds-revision rule.
+
+## Full-match forward pilot
+
+`full_match.py` records the point-confirmed bookmaker revision rule across a prospective Challenger singles cohort. The default run ends when all 30 enrolled fixtures have a terminal record. While the Mac is awake, it discovers listings every minute and enrolls uniquely linked, scheduled fixtures within 20 minutes of the provider's start time, before any evidence of play. Earlier starts have priority when the cohort is nearly full. The roster is keyed by fixture and exchange event, and includes cancellations and zero-signal matches.
+
+From the repository root, with the project environment active:
+
+```sh
+python research/full_match.py record --directory data/processed/challenger-pilot
+python research/full_match.py report --directory data/processed/challenger-pilot
+```
+
+For this linked worktree, reuse the original environment and preregistration:
+
+```sh
+../../.venv/bin/python research/full_match.py record \
+  --directory data/processed/challenger-pilot \
+  --env-file ../../.env \
+  --protocol ../../data/processed/forward-pilot/1374b01/protocol-v1.json
+```
+
+Keep the Mac awake and connected for continuous coverage. Ctrl-C ends the monitored window. Run the same command and directory to resume. An optional `--window-minutes N` sets a wall-time budget for a session. Each trial directory has one writer, an immutable protocol and append-only JSONL sessions. Credentials stay outside the recordings. The recorder polls paired odds and scores once per five seconds while fixtures are active, and maintains a separate authenticated read-only order-book connection per enrolled fixture.
+
+Each session records UTC and monotonic receipt times. After a disconnect or a sequence gap the recorder reconnects with backoff and requires a new snapshot. Replay invalidates the affected book from the last trusted frame. A restart invalidates all active books and breaks odds comparisons. An order whose entry or exit cannot be priced remains explicitly uncertain, and its cost stays reserved. A missing listing or disappearance from live scores alone never ends a match. The supervisor uses an explicit fixture status; after 48 hours past scheduled start an unconfirmed terminal is retained as incomplete.
+
+The capture command writes `report.json` at shutdown; `report` can also read the active journal and write a point-in-time `status.json`. Inspect the per-fixture coverage, live poll count, fraction with verifiable odds and fresh sized quotes, revisions, orders, fills, closed results and unresolved attempts. Full coverage requires a book before a verified opening at love-all, a confirmed terminal, continuous capture and verified sized pricing on every observed live poll. Partial pricing and interrupted, pending or unconfirmed fixtures remain in the denominator. Window durations include internal gaps; restart downtime is visible between windows. The economics section compares closed simulated profit after entry and exit fees with the $80 one-month cost. It does not project a monthly trading rate from partial recordings.

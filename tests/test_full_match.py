@@ -167,3 +167,51 @@ def test_valid_capture_exceeding_ten_minutes_keeps_one_order_and_exit(tmp_path):
     assert paper["entered"]==paper["closed"]==1
     assert float(paper["net_closed_dollars"])==pytest.approx(.06)
     assert paper["ledger"][0]["exit_size"]=="3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_on_other_stream", [False, True])
+async def test_connected_socket_resubscribes_after_global_capture_pause(tmp_path, pause_on_other_stream):
+    path = tmp_path / "session-000001.jsonl"
+    recovered = asyncio.Event()
+    connections = 0
+    with path.open("w", buffering=1) as stream:
+        journal = Journal(stream)
+        journal.busy = True
+        journal.write("session_open", {})
+
+        async def book_stream(emit, tickers):
+            nonlocal connections
+            connections += 1
+            emit("orderbook_snapshot", book(1, opposite=".49" if connections == 2 else ".48"))
+            if connections == 1:
+                journal.last = tuple(t - 20 * SECOND for t in journal.last)
+                if pause_on_other_stream:
+                    journal.write("discovery", {})
+                emit("orderbook_delta", dict(market_ticker="TA", sid=1, seq=2, side="no",
+                                             price_dollars=".48", delta_fp="1"))
+            else:
+                recovered.set()
+            await asyncio.Future()
+
+        task = asyncio.create_task(fixture_book("A", "TA", journal, book_stream))
+        try:
+            await asyncio.wait_for(recovered.wait(), 2)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    from research.score_break import Books
+    books = Books()
+    gaps = 0
+    for frame in trial_frames([path]):
+        kind, data = frame["kind"], frame["data"]
+        if kind == "invalidate":
+            gaps += 1
+            books.levels.clear()
+        elif kind in ("orderbook_snapshot", "orderbook_delta"):
+            books.apply(kind, data, frame["mono_ns"])
+            if kind == "orderbook_delta":
+                assert "TA" not in books.levels
+    assert gaps == 1 and connections == 2
+    assert float(books.ask("TA", "yes", books.updated["TA"])) == pytest.approx(.51)

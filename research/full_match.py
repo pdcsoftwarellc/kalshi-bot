@@ -92,14 +92,17 @@ class Journal:
         self.seq = 0
         self.last = None
         self.busy = False
+        self.last_pause_seq = 0
 
     def write(self, kind, data):
         wall, mono = time.time_ns(), time.monotonic_ns()
-        if self.last and kind != "gap":
+        if self.last:
             wall_delta, mono_delta = wall-self.last[0], mono-self.last[1]
             if mono_delta < 0 or abs(wall_delta-mono_delta) > 15*SECOND or (self.busy and mono_delta > 15*SECOND):
-                self._append("gap", dict(channel="all", reason="clock_or_capture_pause",
-                                         after=self.seq), wall, mono)
+                self.last_pause_seq = self._append(
+                    "gap", dict(channel="all", reason="clock_or_capture_pause", after=self.seq),
+                    wall, mono,
+                )
         return self._append(kind, data, wall, mono)
 
     def _append(self, kind, data, wall, mono):
@@ -146,6 +149,10 @@ async def discover_status():
     return await asyncio.to_thread(read)
 
 
+class _SnapshotRequired(Exception):
+    """The journal invalidated this book during a capture pause."""
+
+
 async def fixture_book(key, ticker, journal, read_book):
     """Each reconnect receives a fresh snapshot and an independent sequence space."""
     from research.score_break import Books
@@ -164,11 +171,19 @@ async def fixture_book(key, ticker, journal, read_book):
             if ticker not in validator.levels:
                 raise ValueError("Delta implies negative depth")
             last_seq = data["seq"]
+            previous_anchor = anchor
             anchor = journal.write(kind, dict(data, sid=sid, fixture=key))
+            # A pause may have been detected by another socket, or by this
+            # very write. Replay ignores deltas until it sees a fresh snapshot.
+            if kind == "orderbook_delta" and journal.last_pause_seq > previous_anchor:
+                raise _SnapshotRequired
             delay = 1
         try:
             await read_book(accept, [ticker])
             reason = "socket_closed"
+        except _SnapshotRequired:
+            # The global gap is already durable. Resubscribe for a snapshot.
+            continue
         except (OSError, TimeoutError, ValueError, RuntimeError) as exc:
             reason = type(exc).__name__
         except Exception as exc:

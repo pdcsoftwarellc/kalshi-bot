@@ -2,6 +2,10 @@
 
 A live tennis trading bot that predicts match win probabilities in real time using a point-by-point Bayesian model and trades (or paper trades) on Kalshi prediction markets.
 
+The research workflow can download ATP singles history from API-Tennis, train a
+point model, and score held-out matches. Trading replay additionally requires
+timestamped predictions, Kalshi quotes with depth, and exchange settlements.
+
 ---
 
 ## How it works
@@ -18,7 +22,7 @@ API-Tennis WebSocket
     → evaluate_signal     edge + quarter-Kelly sizing
     → RiskManager         exposure cap
     → TradingGuard        stop-loss / pause
-    → PaperKalshiClient   simulate fill, log to DB
+    → TradingBot         simulate paper fill, log to DB
     → BroadcastHub        push update to web portal
 ```
 
@@ -56,11 +60,12 @@ In-play features (updated each point):
 1. **Confidence** — Bayesian CI width narrow enough (`MIN_CONFIDENCE`, default 0.60)
 2. **Points observed** — at least `MIN_POINTS_OBSERVED` (default 10) played
 3. **Edge** — `model_prob − market_ask > MIN_EDGE_PCT` (default 0.05) on YES, or equivalent on NO
-4. **Net dollar edge** — edge after $0.07/contract fee > `NET_EDGE_MIN_DOLLARS` (default $0.10)
+4. **Net dollar edge** — edge in dollars after the bot’s assumed $0.07/contract entry fee > `NET_EDGE_MIN_DOLLARS` (default $0.10)
 
 Position sizing: **quarter-Kelly**
 ```
-kelly = edge / payout_ratio
+cost_per_contract = price_in_dollars + entry_fee
+kelly = (edge - entry_fee) / (1 - cost_per_contract)
 contracts = floor(kelly / 4 × bankroll / cost_per_contract)
 ```
 Capped at `MAX_CONTRACTS_PER_SIGNAL` (default 20).
@@ -69,22 +74,14 @@ Capped at `MAX_CONTRACTS_PER_SIGNAL` (default 20).
 
 ## Paper trading
 
-By default (`python bot.py`) the bot runs in pure paper mode using `PaperKalshiClient`:
+By default (`python bot.py`) the bot simulates fills in `TradingBot._execute_signal`:
 
 - **Prices** are fetched from the **production Kalshi API** with no authentication — `/markets` is publicly readable, giving real live bid/ask spreads.
-- **Orders** are never sent anywhere. `place_order()` deducts cost from an in-memory balance and increments a position counter.
-- **All fills are persisted** to `data/trading.db` with `mode="paper"` and are visible in the web portal.
-- If the bot restarts, in-memory balance/positions reset but the DB history is preserved.
-
-```python
-# integration/kalshi_client.py
-class PaperKalshiClient:
-    async def place_order(self, ticker, side, contracts, price_cents, ...):
-        self._balance -= contracts * price_cents / 100.0
-        self._positions[ticker][side] += contracts
-        # logs fill, returns {"status": "paper_filled"}
-        # no HTTP call made
-```
+- **Orders** are never sent. The bot updates in-memory risk/position tracking directly.
+- **All simulated fills are persisted** to `DB_PATH` with `mode="paper"` and are visible in the web portal.
+- Restarts reset in-memory exposure and positions while preserving DB history.
+- Paper fills assume execution at the listed price; they do not model queue priority,
+  available liquidity, slippage, or settlement. They are not evidence of realized profit.
 
 ---
 
@@ -93,11 +90,25 @@ class PaperKalshiClient:
 ### Requirements
 
 - Python 3.12+
-- Dependencies: `pip install -r requirements.txt`
+- On macOS, XGBoost and LightGBM require `brew install libomp`.
+- `requirements.lock` pins the dependencies verified on Python 3.12 / Apple Silicon.
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.lock
+uv pip install --python .venv/bin/python --no-deps -e .
+source .venv/bin/activate
+```
+
+Without `uv`, use `python3.12 -m venv .venv`, activate it, then run
+`python -m pip install -r requirements.lock` and `python -m pip install --no-deps -e .`.
 
 ### Environment variables
 
-Copy `.env.example` to `.env` and fill in:
+For a new checkout, copy `.env.example` to `.env` (preserve an existing `.env`)
+and run `chmod 600 .env`. Fill in the values locally; do not paste secrets in chat.
+Store the private key under the Git-ignored `secrets/` directory and restrict the
+key's permissions with `chmod 600 secrets/kalshi-private.pem`.
 
 ```bash
 # Required for live score feed
@@ -106,25 +117,94 @@ API_TENNIS_KEY=your_api_tennis_key
 # Required only for live trading (--live --prod)
 # Not used in paper mode
 KALSHI_API_KEY=your_kalshi_uuid
-KALSHI_PRIVATE_KEY_PATH=/path/to/rsa_private_key.pem
+KALSHI_PRIVATE_KEY_PATH=secrets/kalshi-private.pem
 
-# Optional overrides (defaults shown)
+# Evaluation limits from .env.example (code defaults are larger)
 MIN_EDGE_PCT=0.05
 MIN_CONFIDENCE=0.60
 MIN_POINTS_OBSERVED=10
-MAX_CONTRACTS_PER_MATCH=50
-MAX_TOTAL_EXPOSURE=500
-MAX_CONTRACTS_PER_SIGNAL=20
+MAX_CONTRACTS_PER_MATCH=5
+MAX_TOTAL_EXPOSURE=25
+MAX_CONTRACTS_PER_SIGNAL=1
 WEB_PORT=8765
 ```
 
-### Data
+RSA and Ed25519 PEM keys are supported. API key IDs and private keys must belong
+to the same environment; demo execution uses `DEMO_KALSHI_API_KEY` and
+`DEMO_KALSHI_PRIVATE_KEY_PATH`. See [Kalshi's key documentation](https://docs.kalshi.com/getting_started/api_keys).
 
-Download the raw ATP/slam point-by-point data before training:
+The project-root `.env` loads regardless of the working directory. Existing shell
+environment variables take precedence. Relative data/key paths resolve from the
+project root. The example uses `data/paper-trading.db` to separate new paper runs
+from the historical `data/trading.db` already in the repository. The portal can
+persist threshold overrides in its database, which take precedence on restart.
+
+Run the read-only checks before starting:
 
 ```bash
-python scripts/download_data.py
+python scripts/check_env.py
+python scripts/check_env.py --online
+# Optional: verify production credentials with a GET balance request; no orders
+python scripts/check_env.py --online --kalshi-env prod
+python -m pytest -q
 ```
+
+The checker hides key values and balances, returns a nonzero exit code for missing
+requirements, and checks installed model libraries. `--online` tests Kalshi public
+market data and API-Tennis REST access; WebSocket subscription coverage must still
+be verified during paper evaluation.
+
+### Historical research data
+
+The bare `python scripts/download_data.py` command uses the legacy GitHub
+repositories, which returned 404. To reproduce the small research run in this
+checkout, use the configured API-Tennis subscription from the project root.
+The downloader caches each UTC day and resumes from existing files. Use
+`--update` to refresh a date range. [API-Tennis fixture documentation](https://api-tennis.com/documentation)
+
+```bash
+source .venv/bin/activate
+python scripts/download_data.py --source api-tennis --start 2025-06-30 --end 2025-07-05
+python scripts/build_features.py --fixtures-dir data/raw/api_tennis --train-before 2025-07-02 --test-from 2025-07-04 --out-dir data/processed/wimbledon-smoke --artifacts-dir data/artifacts/wimbledon-smoke
+python scripts/train.py --processed-dir data/processed/wimbledon-smoke --artifacts-dir data/artifacts/wimbledon-smoke
+python scripts/backtest.py --test-data data/processed/wimbledon-smoke/features_test.parquet --artifacts-dir data/artifacts/wimbledon-smoke --plots-dir data/processed/wimbledon-smoke/evaluation --latency-samples 8
+```
+
+The importer includes finished ATP singles matches with consistent point, game,
+set and match scores. It reports exclusions. Missing player history falls back
+to tour averages. For unfamiliar tournaments without surface information the
+surface features remain unknown. API-Tennis player IDs belong to a different
+namespace from ATP IDs used by the live player resolver. This sample model is
+stored in a research subdirectory and requires an ID mapping for live inference.
+Use a longer history and a new, untouched test period for strategy selection.
+
+### Trading replay
+
+```bash
+python scripts/replay_trades.py tests/fixtures/replay.jsonl --fee 0.02
+```
+
+The example is a deterministic accounting fixture. Supply JSON Lines sorted by
+local receipt time (`ts_ms` in milliseconds). Each event has a Kalshi `ticker`.
+
+| Event kind | Fields |
+| --- | --- |
+| `quote` | `yes_bid`, `yes_ask` in whole cents, with executable `bid_size`, `ask_size` in whole contracts. A size of zero marks an unavailable side. |
+| `prediction` | `model_prob` for YES on this ticker, `confidence`, `points_observed`, computed using only information received by this timestamp. |
+| `settlement` | `yes_cents`, the published YES payout per contract. NO pays its complement. |
+
+A prediction reads the last fresh quote. The first eligible later quote after
+`--latency-ms` supplies the simulated execution price and size. Orders expire
+after `--max-age-ms`. Each ticker can have one pending order. Fills use the
+available cash, visible depth, and limit price. This approximation omits queue
+position and liquidity changes between observations. The report shows settled
+profit, fees, return on settled cost, drawdown at settlements and open cost.
+
+Use `--fee` for a flat cost scenario or `--taker-multiplier` for general quadratic
+taker pricing. Choose `--fee-precision 0.0001` or `0.01` for the applicable period
+and account. The multiplier and precision must apply throughout the replay.
+The signal uses a single-contract fee estimate and the ledger rounds the fee
+once per simulated fill. [Kalshi fee schedule](https://kalshi.com/fee-schedule)
 
 ### Training
 
@@ -146,11 +226,24 @@ Artifacts are saved to `data/artifacts/`: `gbdt_model.pkl`, `calibrator.pkl`, `p
 # Paper trading (default) — real prices, simulated fills
 python bot.py
 
-# Live trading on Kalshi production (real money)
-python bot.py --live --prod
 ```
 
 Web portal starts automatically at **http://127.0.0.1:8765**.
+
+### Live trading readiness
+
+The existing `--live` / `--prod` flags remain available, but this version is not
+ready for unattended real-money execution:
+
+- `KalshiClient.place_order()` still uses the removed `/portfolio/orders` write
+  endpoint. Migrate to [Create Order V2](https://docs.kalshi.com/api-reference/orders/create-order-v2)
+  and validate its request/response handling in demo.
+- The execution path counts an accepted order as a complete fill. It must track
+  actual fills, partial fills, outstanding orders, and reconciliation after restarts.
+- Stop-loss and force-exit controls currently block new entries; they do not
+  liquidate existing positions. The configured stop-loss is not a guaranteed loss cap.
+- The six-day research sample covers one tournament. Evaluate with realistic
+  fees, fresh executable quotes, and settlement accounting before choosing a live budget.
 
 ---
 
@@ -171,7 +264,8 @@ tennis/
     types.py                MatchState, PredictionResult dataclasses
 
 integration/
-    kalshi_client.py        PaperKalshiClient, HybridKalshiClient, KalshiClient
+    kalshi_client.py        KalshiClient, HybridKalshiClient
+    preflight.py            Local startup validation
     market_finder.py        Resolves live matches to Kalshi market tickers
     tennis_feed.py          API-Tennis WebSocket + REST fallback
     match_tracker.py        Per-match session management
@@ -186,6 +280,7 @@ web/
     state.py                Runtime-adjustable thresholds
 
 scripts/
+    check_env.py            Read-only dependency, artifact, and connection checks
     build_features.py       Feature dataset construction
     train.py                Model training
     backtest.py             Held-out test evaluation
@@ -197,13 +292,15 @@ scripts/
 
 ## Key design decisions
 
-**No demo API.** The Kalshi demo environment returns stale/zero prices, making it useless for paper trading edge evaluation. `PaperKalshiClient` reads production prices (no auth required) and simulates fills locally.
+**Production prices for paper mode.** `KalshiClient` reads public production prices
+without credentials while `TradingBot` simulates fills locally. Separate demo
+credentials are needed for demo execution.
 
 **No GBDT/updater blending.** An earlier design blended the GBDT estimate and the Bayesian posterior at 20 points. This was removed — the updater already handles the prior-to-data transition cleanly through its Beta-Binomial parameterisation.
 
 **Leakage-free calibration.** The isotonic calibrator is fitted on actual match winners (`match_winner` from ATP/slam metadata), not on `server_won.mean() > 0.5` which is derivable from training features. The validation set is split temporally: H1 for GBDT early stopping, H2 for calibrator fitting.
 
-**Server identity.** Main-tour PBP data provides only a raw S/R sequence with no server labels. `_assign_server_to_points()` in `build_features.py` reconstructs the correct server for each point by tracking game boundaries, service alternation, and tiebreak rules.
+**Server identity.** Main-tour point histories encode game, set, and tiebreak service boundaries. The feature builder preserves those boundaries and computes each row from the score before its target point.
 
 ---
 

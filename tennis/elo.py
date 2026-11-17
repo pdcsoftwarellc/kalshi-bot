@@ -70,7 +70,7 @@ class EloTracker:
         for _, row in df.iterrows():
             surface = str(row.get("surface", "Hard"))
             if surface not in SURFACES:
-                surface = "Hard"
+                continue
 
             w_id = str(row["winner_id"])
             l_id = str(row["loser_id"])
@@ -121,7 +121,7 @@ class EloTracker:
             ELO rating (float). Returns INITIAL_RATING for unknown players.
         """
         if surface not in SURFACES:
-            surface = "Hard"
+            return INITIAL_RATING
 
         player_id = str(player_id)
 

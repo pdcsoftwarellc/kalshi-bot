@@ -11,7 +11,7 @@ Trade signal emitted when:
   4. net_dollar_edge (after fees) > NET_EDGE_MIN_DOLLARS
 
 Position sizing: quarter-Kelly
-  kelly_fraction = edge / odds_against
+  kelly_fraction = (edge - fee_per_contract) / (1 - cost_per_contract)
   contracts = floor(kelly_fraction / 4 * bankroll / cost_per_contract)
   capped at MAX_CONTRACTS_PER_SIGNAL
 """
@@ -71,23 +71,19 @@ def quarter_kelly_size(
     max_contracts: int,
     fee_per_contract: float = 0.07,
 ) -> int:
-    """Quarter-Kelly position size in contracts.
+    """Spend a quarter of the Kelly fraction for a $1 binary payout.
 
-    kelly_fraction = edge / (payout_ratio)
-    payout_ratio = (100 - price_cents) / price_cents  (net win per dollar risked)
+    A purchased contract costs c including the entry fee. The full Kelly
+    fraction of cash at risk is (p - c) / (1 - c).
     """
-    if price_cents <= 0 or price_cents >= 100 or edge <= 0:
+    if not 0 < price_cents < 100 or not 0 <= fee_per_contract < 1:
         return 0
-    cost = price_cents / 100.0
-    payout_ratio = (100 - price_cents) / price_cents
-    if payout_ratio <= 0:
+    cost_per = price_cents / 100.0 + fee_per_contract
+    net_edge = edge - fee_per_contract
+    if not 0 < cost_per < 1 or not 0 < net_edge or bankroll <= 0:
         return 0
-    kelly = edge / payout_ratio
-    quarter = kelly / 4.0
-    cost_per = cost + fee_per_contract
-    if cost_per <= 0:
-        return 0
-    contracts = int(math.floor(quarter * bankroll / cost_per))
+    fraction = min(1.0, net_edge / (1 - cost_per)) / 4
+    contracts = math.floor(fraction * bankroll / cost_per)
     return max(0, min(contracts, max_contracts))
 
 
@@ -116,13 +112,13 @@ def evaluate_signal(
         return None
 
     side, edge, price_cents = compute_edge(model_prob, best_ask_cents, best_bid_cents)
-    if side is None or edge < min_edge:
+    if side is None or (edge < min_edge and not math.isclose(edge, min_edge, abs_tol=1e-12)):
         log.debug("Signal rejected: edge %.4f < %.4f (side=%s)", edge, min_edge, side)
         return None
 
     # Net dollar edge after fees
-    net_dollar = edge * 100 - fee_per_contract  # per contract
-    if net_dollar < net_edge_min:
+    net_dollar = edge - fee_per_contract  # dollars per $1 binary contract
+    if net_dollar <= 0 or (net_dollar < net_edge_min and not math.isclose(net_dollar, net_edge_min, abs_tol=1e-12)):
         log.debug("Signal rejected: net dollar edge $%.3f < $%.3f", net_dollar, net_edge_min)
         return None
 

@@ -3,7 +3,7 @@
 Required env vars:
   API_TENNIS_KEY          — API-Tennis authentication key
   KALSHI_API_KEY          — Kalshi access key (UUID)
-  KALSHI_PRIVATE_KEY_PATH — Path to RSA private key PEM file
+  KALSHI_PRIVATE_KEY_PATH — Path to RSA or Ed25519 private key PEM file
 
 Optional env vars (with defaults):
   MIN_EDGE_PCT            — Minimum edge threshold (default: 0.05)
@@ -21,23 +21,33 @@ Optional env vars (with defaults):
   LOG_LEVEL               — Logging level (default: INFO)
 """
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()  # reads .env from cwd
+PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env")  # explicit environment variables take precedence
+
+
+def _project_path(name: str, default: str = "") -> str:
+    value = os.environ.get(name, default).strip()
+    if not value:
+        return ""
+    path = Path(value).expanduser()
+    return str(path if path.is_absolute() else PROJECT_ROOT / path)
 
 # --- Required ---
 API_TENNIS_KEY: str = os.environ.get("API_TENNIS_KEY", "")
 KALSHI_API_KEY: str = os.environ.get("KALSHI_API_KEY", "")
-KALSHI_PRIVATE_KEY_PATH: str = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "")
+KALSHI_PRIVATE_KEY_PATH: str = _project_path("KALSHI_PRIVATE_KEY_PATH")
 
 # --- Demo Kalshi credentials (used when --demo, which is the default) ---
 DEMO_KALSHI_API_KEY: str = os.environ.get("DEMO_KALSHI_API_KEY", "")
-DEMO_KALSHI_PRIVATE_KEY_PATH: str = os.environ.get("DEMO_KALSHI_PRIVATE_KEY_PATH", "")
+DEMO_KALSHI_PRIVATE_KEY_PATH: str = _project_path("DEMO_KALSHI_PRIVATE_KEY_PATH")
 
 # --- Hybrid pricing: read real prices from prod, trade on demo ---
 HYBRID_PRICING: bool = os.environ.get("HYBRID_PRICING", "").lower() in ("1", "true", "yes")
 PROD_KALSHI_API_KEY: str = os.environ.get("PROD_KALSHI_API_KEY", "")
-PROD_KALSHI_PRIVATE_KEY_PATH: str = os.environ.get("PROD_KALSHI_PRIVATE_KEY_PATH", "")
+PROD_KALSHI_PRIVATE_KEY_PATH: str = _project_path("PROD_KALSHI_PRIVATE_KEY_PATH")
 
 # --- Trading parameters ---
 MIN_EDGE_PCT: float = float(os.environ.get("MIN_EDGE_PCT", "0.05"))
@@ -47,22 +57,22 @@ MAX_CONTRACTS_PER_MATCH: int = int(os.environ.get("MAX_CONTRACTS_PER_MATCH", "50
 MAX_TOTAL_EXPOSURE: float = float(os.environ.get("MAX_TOTAL_EXPOSURE", "500.0"))
 MAX_CONTRACTS_PER_SIGNAL: int = int(os.environ.get("MAX_CONTRACTS_PER_SIGNAL", "20"))
 NET_EDGE_MIN_DOLLARS: float = float(os.environ.get("NET_EDGE_MIN_DOLLARS", "0.10"))
-KALSHI_FEE_PER_CONTRACT: float = 0.07  # fixed fee, not configurable
+KALSHI_FEE_PER_CONTRACT: float = 0.07  # flat cost assumption used by the bot
 
 # --- Infrastructure ---
-ARTIFACTS_DIR: str = os.environ.get("ARTIFACTS_DIR", "data/artifacts")
-ALIASES_PATH: str = os.environ.get("ALIASES_PATH", "data/aliases.json")
-ATP_RAW_DIR: str = os.environ.get("ATP_RAW_DIR", "data/raw/tennis_atp")
+ARTIFACTS_DIR: str = _project_path("ARTIFACTS_DIR", "data/artifacts")
+ALIASES_PATH: str = _project_path("ALIASES_PATH", "data/aliases.json")
+ATP_RAW_DIR: str = _project_path("ATP_RAW_DIR", "data/raw/tennis_atp")
 KALSHI_SERIES_TICKER: str = os.environ.get("KALSHI_SERIES_TICKER", "KXATPMATCH")
 MARKET_REFRESH_SECS: int = int(os.environ.get("MARKET_REFRESH_SECS", "60"))
 REST_POLL_SECS: float = float(os.environ.get("REST_POLL_SECS", "3.0"))
 LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
 
 # --- Kalshi endpoints ---
-KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
-KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
-KALSHI_WS_PROD = "wss://trading-api.kalshi.com/trade-api/ws/v2"
-KALSHI_WS_DEMO = "wss://demo-api.kalshi.co/trade-api/ws/v2"
+KALSHI_PROD_BASE = "https://external-api.kalshi.com/trade-api/v2"
+KALSHI_DEMO_BASE = "https://external-api.demo.kalshi.co/trade-api/v2"
+KALSHI_WS_PROD = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
+KALSHI_WS_DEMO = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"
 
 # --- API-Tennis endpoints ---
 API_TENNIS_WS = "wss://wss.api-tennis.com/live"
@@ -70,7 +80,7 @@ API_TENNIS_REST = "https://api.api-tennis.com/tennis/"
 
 # --- Web portal ---
 WEB_PORT: int = int(os.environ.get("WEB_PORT", "8765"))
-DB_PATH: str = os.environ.get("DB_PATH", "data/trading.db")
+DB_PATH: str = _project_path("DB_PATH", "data/trading.db")
 MATCH_STOP_LOSS_DOLLARS: float = float(os.environ.get("MATCH_STOP_LOSS_DOLLARS", "10.0"))
 PORTFOLIO_STOP_LOSS_DOLLARS: float = float(os.environ.get("PORTFOLIO_STOP_LOSS_DOLLARS", "50.0"))
 PROFIT_TARGET_DOLLARS: float = float(os.environ.get("PROFIT_TARGET_DOLLARS", "20.0"))

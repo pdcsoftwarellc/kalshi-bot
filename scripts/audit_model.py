@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tennis.features import FEATURE_COLUMNS
 from tennis.model import PointWinModel
 from tennis.calibration import MatchWinCalibrator
-from tennis.markov import match_win_prob
-from tennis.types import MatchFormat, MatchState
+from tennis.research import opening_predictions
+from tennis.types import MatchFormat
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
 ARTIFACTS_DIR = Path(__file__).parent.parent / "data" / "artifacts"
@@ -58,7 +58,7 @@ def point_level_metrics(model: PointWinModel, df: pd.DataFrame, label: str) -> d
     X = df[FEATURE_COLUMNS].values.astype(np.float32)
     y = df["server_won"].values.astype(np.float32)
     p = model.predict_proba(X)
-    ll = log_loss(y, p)
+    ll = log_loss(y, p, labels=[0, 1])
     bs = brier_score_loss(y, p)
     print(f"  {label:12s}  log-loss={ll:.4f}  brier={bs:.4f}  (n={len(y):,})")
     return {f"{label}_point_logloss": ll, f"{label}_point_brier": bs}
@@ -70,47 +70,8 @@ def match_level_metrics(
     df: pd.DataFrame,
     label: str,
 ) -> dict:
-    if "match_id" not in df.columns:
-        print(f"  {label}: no match_id column, skipping match-level")
-        return {}
-
-    match_format = MatchFormat.best_of_3_tiebreak()
-    probs = []
-    outcomes = []
-
-    for match_id, group in df.groupby("match_id"):
-        group = group.sort_values("point_idx")
-        if len(group) < 5:
-            continue
-
-        X_first = group[FEATURE_COLUMNS].values[:1].astype(np.float32)
-        p_serve = float(model.predict_proba(X_first)[0])
-
-        state = MatchState(
-            sets_p1=0, sets_p2=0, games_p1=0, games_p2=0,
-            points_p1=0, points_p2=0, server=0,
-            match_format=match_format,
-        )
-        raw_prob = match_win_prob(state, p_serve)
-        probs.append(raw_prob)
-
-        if "match_winner" in group.columns:
-            mw = group["match_winner"].iloc[0]
-            if mw == 0:
-                outcomes.append(-1)  # unknown
-            else:
-                outcomes.append(int(mw == 1))
-        else:
-            outcomes.append(int(group["server_won"].mean() > 0.5))
-
-    probs = np.array(probs)
-    outcomes = np.array(outcomes)
-
-    # Filter unknown outcomes
-    valid = outcomes >= 0
-    probs = probs[valid]
-    outcomes = outcomes[valid]
-
+    starts, probs = opening_predictions(model, df, MatchFormat.best_of_3_tiebreak())
+    outcomes = starts.match_winner.eq(1).to_numpy(dtype=int)
     if len(probs) == 0:
         return {}
 
@@ -118,8 +79,8 @@ def match_level_metrics(
     probs = np.clip(probs, 1e-6, 1 - 1e-6)
     cal_probs = np.clip(cal_probs, 1e-6, 1 - 1e-6)
 
-    ll_raw = log_loss(outcomes, probs)
-    ll_cal = log_loss(outcomes, cal_probs)
+    ll_raw = log_loss(outcomes, probs, labels=[0, 1])
+    ll_cal = log_loss(outcomes, cal_probs, labels=[0, 1])
     bs_raw = brier_score_loss(outcomes, probs)
     bs_cal = brier_score_loss(outcomes, cal_probs)
     ece = MatchWinCalibrator().expected_calibration_error(cal_probs, outcomes)
@@ -216,6 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description="Audit model for overfitting and leakage")
     parser.add_argument("--artifacts-dir", default=str(ARTIFACTS_DIR))
     parser.add_argument("--processed-dir", default=str(PROCESSED_DIR))
+    parser.add_argument("--include-test", action="store_true", help="Include the final holdout in the diagnostic report")
     args = parser.parse_args()
 
     print("=== Loading model artifacts ===")
@@ -226,7 +188,7 @@ def main():
 
     # Load datasets
     splits = {}
-    for name in ["train", "val", "test"]:
+    for name in (["train", "val", "test"] if args.include_test else ["train", "val"]):
         path = os.path.join(args.processed_dir, f"features_{name}.parquet")
         if os.path.exists(path):
             splits[name] = load_split(path)
@@ -256,8 +218,8 @@ def main():
     imp_metrics = feature_importance_analysis(model)
     all_metrics.update(imp_metrics)
 
-    # Permutation importance (on test set if available, else val)
-    perm_df = splits.get("test", splits.get("val"))
+    # Use validation for exploratory feature diagnostics.
+    perm_df = splits.get("val")
     if perm_df is not None:
         perm_metrics = permutation_importance_test(model, calibrator, perm_df)
         all_metrics.update(perm_metrics)

@@ -24,7 +24,6 @@ import os
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 # Add project root to path
@@ -36,8 +35,10 @@ from tennis.features import (
     build_pre_match_features,
     combine_features,
     FEATURE_COLUMNS,
-    TOUR_AVERAGES,
+    build_inplay_features,
 )
+
+from tennis.research import RecordedGame, historical_points, parse_pbp_games
 
 TRAIN_CUTOFF = "2022-01-01"
 VAL_CUTOFF = "2023-01-01"
@@ -94,145 +95,15 @@ def build_name_to_id(matches_df: pd.DataFrame) -> dict:
     return mapping
 
 
-def parse_pbp_sequence(pbp: str) -> list:
-    """Parse a PBP sequence string to a list of 0/1 (1=server won point).
-
-    The JeffSackmann format uses:
-        S = server wins point
-        R = returner wins point
-    Other characters (set/game separators) are skipped.
-    """
-    result = []
-    for c in str(pbp):
-        if c == "S":
-            result.append(1)
-        elif c == "R":
-            result.append(0)
-    return result
-
-
-def _assign_server_to_points(points: list[int]) -> list[tuple[int, int]]:
-    """Assign correct server identity to each point in a PBP sequence.
-
-    In the S/R format, S=server won, R=returner won. The server identity
-    alternates each game. Player 1 serves first.
-
-    Args:
-        points: list of 0/1 (1 = current server won point)
-
-    Returns:
-        list of (server, server_won) where server is 1 or 2.
-    """
-    result: list[tuple[int, int]] = []
-    current_server = 1  # player 1 serves first
-    srv_pts = 0  # server's points in current game
-    rtn_pts = 0  # returner's points in current game
-    games_p1 = 0  # games won by p1 in current set
-    games_p2 = 0  # games won by p2 in current set
-    in_tiebreak = False
-    tb_points_played = 0
-
-    for server_won in points:
-        result.append((current_server, server_won))
-
-        if in_tiebreak:
-            # Tiebreak scoring
-            if server_won:
-                srv_pts += 1
-            else:
-                rtn_pts += 1
-            tb_points_played += 1
-
-            # Check tiebreak end: first to 7 with 2+ lead
-            if (srv_pts >= 7 or rtn_pts >= 7) and abs(srv_pts - rtn_pts) >= 2:
-                # Tiebreak over — determine who won
-                if srv_pts > rtn_pts:
-                    # Server won tiebreak = won the set
-                    if current_server == 1:
-                        games_p1 = 0
-                        games_p2 = 0
-                    else:
-                        games_p1 = 0
-                        games_p2 = 0
-                else:
-                    games_p1 = 0
-                    games_p2 = 0
-
-                # After tiebreak, the OTHER player serves first in the new set
-                # (the player who received first in the tiebreak)
-                current_server = 2 if current_server == 1 else 1
-                srv_pts = 0
-                rtn_pts = 0
-                in_tiebreak = False
-                tb_points_played = 0
-            else:
-                # Tiebreak server rotation: first point by initial server,
-                # then alternate every 2 points
-                # Server changes after points 1, 3, 5, 7, ...
-                if tb_points_played % 2 == 1:
-                    current_server = 2 if current_server == 1 else 1
-                    srv_pts, rtn_pts = rtn_pts, srv_pts
-        else:
-            # Standard game scoring
-            if server_won:
-                srv_pts += 1
-            else:
-                rtn_pts += 1
-
-            # Check if game is over
-            game_over = False
-            if srv_pts >= 4 and srv_pts - rtn_pts >= 2:
-                game_over = True
-                # Server won the game
-                if current_server == 1:
-                    games_p1 += 1
-                else:
-                    games_p2 += 1
-            elif rtn_pts >= 4 and rtn_pts - srv_pts >= 2:
-                game_over = True
-                # Returner won the game
-                if current_server == 1:
-                    games_p2 += 1
-                else:
-                    games_p1 += 1
-
-            if game_over:
-                srv_pts = 0
-                rtn_pts = 0
-
-                # Check for tiebreak (6-6)
-                if games_p1 == 6 and games_p2 == 6:
-                    in_tiebreak = True
-                    tb_points_played = 0
-                    # Server alternates (the player who would normally serve)
-                    current_server = 2 if current_server == 1 else 1
-                elif games_p1 >= 6 and games_p1 - games_p2 >= 2:
-                    # P1 won the set — reset games, alternate serve
-                    games_p1 = 0
-                    games_p2 = 0
-                    current_server = 2 if current_server == 1 else 1
-                elif games_p2 >= 6 and games_p2 - games_p1 >= 2:
-                    # P2 won the set — reset games, alternate serve
-                    games_p1 = 0
-                    games_p2 = 0
-                    current_server = 2 if current_server == 1 else 1
-                else:
-                    # Normal game change — alternate serve
-                    current_server = 2 if current_server == 1 else 1
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Slam PBP loading (tennis_slam_pointbypoint)
 # ---------------------------------------------------------------------------
 
-def load_slam_pbp(slam_dir: Path, name_to_id: dict) -> list:
+def load_slam_pbp(slam_dir: Path, name_to_id: dict, atp_matches: pd.DataFrame) -> list:
     """Load Grand Slam point-by-point data and return list of match dicts.
 
     Each match dict contains:
         match_id, player1_id, player2_id, surface, tourney_level,
-        match_date, winner (1 or 2), points: list of (server: 1/2, winner: 1/2)
+        match_date, winner (1 or 2), best_of and a sequence of RecordedGame values.
     """
     # Exclude doubles and mixed files (they have -doubles.csv or -mixed.csv suffixes)
     matches_files = sorted(
@@ -280,11 +151,15 @@ def load_slam_pbp(slam_dir: Path, name_to_id: dict) -> list:
         print("  No slam data loaded")
         return []
 
-    # Filter to men's singles only (where event_name is available)
-    # Non-suffixed files (without -doubles/-mixed) are already men's singles
-    if "event_name" in matches.columns:
-        has_event = matches["event_name"].notna() & (matches["event_name"] != "")
-        matches = matches[~has_event | matches["event_name"].str.contains("Men", na=False, case=False)]
+    # Anchor every observation to its ATP tournament start. ATP outcomes
+    # carry that same date, so a later guessed date could leak the result.
+    slam_names = {"ausopen": "Australian Open", "frenchopen": "Roland Garros",
+                  "wimbledon": "Wimbledon", "usopen": "US Open"}
+    atp_lookup = {}
+    for row in atp_matches.loc[atp_matches.tourney_level.eq("G")].itertuples():
+        date = str(row.tourney_date)
+        pair = frozenset((str(int(row.winner_id)), str(int(row.loser_id))))
+        atp_lookup[(date[:4], row.tourney_name, pair)] = row
 
     print(f"  Slam matches: {len(matches):,}, slam points: {len(points):,}")
 
@@ -299,7 +174,9 @@ def load_slam_pbp(slam_dir: Path, name_to_id: dict) -> list:
             skipped += 1
             continue
 
-        match_points = points_grouped.get_group(mid).sort_values("PointNumber")
+        match_points = points_grouped.get_group(mid)
+        # Source files contain non-point rows (e.g. clock updates).
+        match_points = match_points.loc[match_points.PointServer.isin([1, 2]) & match_points.PointWinner.isin([1, 2])]
         if len(match_points) < 10:
             skipped += 1
             continue
@@ -313,46 +190,22 @@ def load_slam_pbp(slam_dir: Path, name_to_id: dict) -> list:
         slam = str(mrow.get("_slam", mrow.get("slam", "")))
         surface = SLAM_SURFACE.get(slam, "Hard")
         year = str(mrow.get("_year", mrow.get("year", "")))
-        winner_val = mrow.get("winner", 0)
-        winner = int(winner_val) if pd.notna(winner_val) and winner_val != 0 else 0
-
-        # Infer winner from SetWinner if not available in match metadata
-        if winner == 0 and "SetWinner" in match_points.columns:
-            set_winners = match_points.groupby("SetNo")["SetWinner"].last()
-            p1_sets = int((set_winners == 1).sum())
-            p2_sets = int((set_winners == 2).sum())
-            if p1_sets > p2_sets:
-                winner = 1
-            elif p2_sets > p1_sets:
-                winner = 2
-
-        # Build match date from year + slam approximate month
-        slam_months = {"ausopen": "01", "frenchopen": "06", "wimbledon": "07", "usopen": "09"}
-        month = slam_months.get(slam, "06")
-        match_date = f"{year}-{month}-15"
-
-        # Extract point sequence: (PointServer, PointWinner)
-        point_list = []
-        for _, pt in match_points.iterrows():
-            ps = pt.get("PointServer", 0)
-            pw = pt.get("PointWinner", 0)
-            if ps in (1, 2) and pw in (1, 2):
-                server_won = 1 if ps == pw else 0
-                point_list.append((int(ps), server_won))
-
-        if len(point_list) < 10:
+        row = atp_lookup.get((year, slam_names.get(slam), frozenset((p1_id, p2_id))))
+        if row is None:
             skipped += 1
             continue
-
+        games = []
+        for (set_no, _), group in match_points.groupby(["SetNo", "GameNo"], sort=False):
+            points_in_game = [(int(ps), int(ps == pw)) for ps, pw in
+                              zip(group.PointServer, group.PointWinner)]
+            games.append(RecordedGame(int(set_no), points_in_game, group.PointServer.nunique() > 1))
         result.append({
-            "match_id": str(mid),
-            "player1_id": p1_id,
-            "player2_id": p2_id,
-            "surface": surface,
-            "tourney_level": "G",
-            "match_date": match_date,
-            "winner": winner,
-            "points": point_list,  # list of (server: 1/2, server_won: 0/1)
+            "match_id": f"{row.tourney_id}-{row.match_num}",
+            "player1_id": p1_id, "player2_id": p2_id,
+            "surface": surface, "tourney_level": "G",
+            "match_date": pd.to_datetime(str(row.tourney_date), format="%Y%m%d").date().isoformat(),
+            "winner": 1 if str(int(row.winner_id)) == p1_id else 2,
+            "best_of": int(row.best_of), "games": games,
         })
 
     print(f"  Slam matches loaded: {len(result):,} ({skipped} skipped)")
@@ -420,8 +273,12 @@ def load_main_pbp(pbp_dir: Path, matches_df: pd.DataFrame, name_to_id: dict) -> 
             skipped += 1
             continue
 
-        points = parse_pbp_sequence(pbp_str)
-        if len(points) < 10:
+        try:
+            games = parse_pbp_games(pbp_str)
+        except ValueError:
+            skipped += 1
+            continue
+        if sum(len(game.points) for game in games) < 10:
             skipped += 1
             continue
 
@@ -465,19 +322,15 @@ def load_main_pbp(pbp_dir: Path, matches_df: pd.DataFrame, name_to_id: dict) -> 
             else:
                 p1_id, p2_id = loser_id, winner_id
 
-            # Convert S/R string to (server, server_won) format
-            # Assign correct server identity based on game boundaries
-            point_list = _assign_server_to_points(points)  # server=1 means "initial server"
-
             result.append({
-                "match_id": str(pbp_row.get("pbp_id", "")),
+                "match_id": f"{best_match['tourney_id']}-{best_match['match_num']}",
                 "player1_id": p1_id,
                 "player2_id": p2_id,
                 "surface": surface,
                 "tourney_level": tourney_level,
                 "match_date": match_date,
                 "winner": 1 if s1 == winner_name else 2,
-                "points": point_list,
+                "games": games, "best_of": int(best_match["best_of"]),
             })
         else:
             unmatched += 1
@@ -498,106 +351,21 @@ def build_training_rows_from_matches(
 ) -> pd.DataFrame:
     """Generate one training row per point from processed match dicts."""
     rows = []
-    total_points = 0
-    skipped = 0
-
     for match in match_list:
-        p1_id = match["player1_id"]
-        p2_id = match["player2_id"]
-        surface = match["surface"]
-        tourney_level = match["tourney_level"]
-        match_date = match["match_date"]
-        point_list = match["points"]
-        match_winner = match.get("winner", 0)  # 1=player1 won, 2=player2 won
-
-        # Pre-match features (computed once per match, using initial server = p1)
-        try:
-            pre_match = build_pre_match_features(
-                server_id=p1_id,
-                returner_id=p2_id,
-                surface=surface,
-                tournament_level=tourney_level,
-                match_date=match_date,
-                player_stats_df=player_stats_df,
-                elo_tracker=elo_tracker,
-                h2h_df=h2h_df if h2h_df is not None and not h2h_df.empty else None,
-            )
-        except Exception:
-            skipped += 1
-            continue
-
-        # Track running stats
-        serve_pts_played_p1 = 0
-        serve_pts_won_p1 = 0
-        serve_pts_played_p2 = 0
-        serve_pts_won_p2 = 0
-        recent_points = []
-        sets_p1 = 0
-        sets_p2 = 0
-        games_p1 = 0
-        games_p2 = 0
-
-        for pt_idx, (server, server_won) in enumerate(point_list):
-            # Current server stats for in-play features
-            if server == 1:
-                sp_played = serve_pts_played_p1
-                sp_won = serve_pts_won_p1
-                rp_played = serve_pts_played_p2
-                rp_won = serve_pts_won_p2
-            else:
-                sp_played = serve_pts_played_p2
-                sp_won = serve_pts_won_p2
-                rp_played = serve_pts_played_p1
-                rp_won = serve_pts_won_p1
-
-            inplay = {
-                "match_srv_pts_won_pct": (
-                    sp_won / sp_played if sp_played > 0
-                    else TOUR_AVERAGES["srv_total_won_pct"]
-                ),
-                "match_rtn_pts_won_pct": (
-                    (rp_played - rp_won) / rp_played if rp_played > 0
-                    else TOUR_AVERAGES["rtn_won_pct"]
-                ),
-                "momentum_last5": float(sum(recent_points[-5:])) if recent_points else 2.5,
-                "momentum_last10": float(sum(recent_points[-10:])) if recent_points else 5.0,
-                "sets_server": float(sets_p1 if server == 1 else sets_p2),
-                "sets_returner": float(sets_p2 if server == 1 else sets_p1),
-                "games_server": float(games_p1 if server == 1 else games_p2),
-                "games_returner": float(games_p2 if server == 1 else games_p1),
-                "points_played_total": float(
-                    serve_pts_played_p1 + serve_pts_played_p2
-                ),
-                "is_tiebreak": 0.0,
-                "is_final_set": float(
-                    (sets_p1 + sets_p2) >= 4  # rough heuristic for slams
-                ),
-            }
-
-            feature_vec = combine_features(pre_match, inplay)
-            row_data = dict(zip(FEATURE_COLUMNS, feature_vec))
-            row_data["server_won"] = int(server_won)
-            row_data["match_date"] = match_date
-            row_data["match_id"] = match["match_id"]
-            row_data["match_winner"] = match_winner
-            row_data["point_idx"] = pt_idx
-            rows.append(row_data)
-
-            # Update running stats
-            if server == 1:
-                serve_pts_played_p1 += 1
-                serve_pts_won_p1 += server_won
-            else:
-                serve_pts_played_p2 += 1
-                serve_pts_won_p2 += server_won
-
-            recent_points.append(server_won)
-            if len(recent_points) > 20:
-                recent_points = recent_points[-20:]
-
-            total_points += 1
-
-    print(f"  Generated {total_points:,} training points ({skipped} matches skipped)")
+        p1, p2 = match["player1_id"], match["player2_id"]
+        pre = [build_pre_match_features(srv, rtn, match["surface"], match["tourney_level"],
+                                        match["match_date"], player_stats_df, elo_tracker, h2h_df)
+               for srv, rtn in ((p1, p2), (p2, p1))]
+        for idx, (state, won) in enumerate(historical_points(match["games"], match["best_of"])):
+            features = combine_features(pre[state.server], build_inplay_features(state))
+            rows.append({
+                **dict(zip(FEATURE_COLUMNS, features)),
+                "server_won": won, "match_date": match["match_date"],
+                "match_id": match["match_id"], "match_winner": match.get("winner", 0),
+                "point_idx": idx, "server": state.server, "best_of": match["best_of"],
+                "points_p1": state.points_p1, "points_p2": state.points_p2,
+            })
+    print(f"  Generated {len(rows):,} training points")
     return pd.DataFrame(rows)
 
 
@@ -616,21 +384,14 @@ def build_h2h(matches_df: pd.DataFrame) -> pd.DataFrame:
         p1, p2 = min(w, l), max(w, l)
         key = (p1, p2)
 
-        stats = pair_stats.get(key, {"n": 0, "p1_wins": 0})
-        n = stats["n"]
-        p1_wins = stats["p1_wins"]
-        if n > 0:
-            records.append({
-                "player1_id": p1,
-                "player2_id": p2,
-                "date": row["tourney_date"],
-                "n_matches": n,
-                "srv_win_rate": p1_wins / n,
-            })
-
-        stats["n"] += 1
-        stats["p1_wins"] += int(w == p1)
-        pair_stats[key] = stats
+        n, p1_wins = pair_stats.get(key, (0, 0))
+        n += 1
+        p1_wins += int(w == p1)
+        pair_stats[key] = (n, p1_wins)
+        for server, returner, wins in ((p1, p2, p1_wins), (p2, p1, n - p1_wins)):
+            records.append({"player1_id": server, "player2_id": returner,
+                            "date": row["tourney_date"], "n_matches": n,
+                            "srv_win_rate": wins / n})
 
     return pd.DataFrame(records)
 
@@ -643,13 +404,23 @@ def main():
     parser.add_argument("--out-dir", default=str(PROCESSED_DIR))
     parser.add_argument("--artifacts-dir", default=str(ARTIFACTS_DIR))
     parser.add_argument("--start-year", type=int, default=2003)
+    parser.add_argument("--fixtures-dir", type=Path, help="Daily ATP JSON from download_data.py --source api-tennis")
+    parser.add_argument("--train-before", default=TRAIN_CUTOFF, help="First validation date")
+    parser.add_argument("--test-from", default=VAL_CUTOFF, help="First test date")
     args = parser.parse_args()
+    train_end, val_end = pd.Timestamp(args.train_before), pd.Timestamp(args.test_from)
+    if train_end >= val_end:
+        parser.error("--train-before must precede --test-from")
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(args.artifacts_dir, exist_ok=True)
 
     print("=== Step 1: Loading ATP match data ===")
-    matches_df = load_atp_matches(Path(args.atp_dir), start_year=args.start_year)
+    if args.fixtures_dir:
+        from tennis.fixture_history import load_fixtures
+        matches_df, all_matches = load_fixtures(args.fixtures_dir)
+    else:
+        matches_df = load_atp_matches(Path(args.atp_dir), start_year=args.start_year)
 
     print("\n=== Step 2: Building ELO tracker ===")
     elo = EloTracker()
@@ -669,16 +440,19 @@ def main():
     h2h.to_parquet(os.path.join(args.artifacts_dir, "h2h.parquet"), index=False)
     print(f"  H2H records: {len(h2h):,} rows")
 
-    print("\n=== Step 5: Building name→ID mapping ===")
-    name_to_id = build_name_to_id(matches_df)
+    if not args.fixtures_dir:
+        print("\n=== Step 5: Building name→ID mapping ===")
+        name_to_id = build_name_to_id(matches_df)
 
-    print("\n=== Step 6: Loading slam PBP data ===")
-    slam_matches = load_slam_pbp(Path(args.slam_dir), name_to_id)
+        print("\n=== Step 6: Loading slam PBP data ===")
+        slam_matches = load_slam_pbp(Path(args.slam_dir), name_to_id, matches_df)
 
-    print("\n=== Step 7: Loading main tour PBP data ===")
-    main_matches = load_main_pbp(Path(args.pbp_dir), matches_df, name_to_id)
+        print("\n=== Step 7: Loading main tour PBP data ===")
+        main_matches = load_main_pbp(Path(args.pbp_dir), matches_df, name_to_id)
 
-    all_matches = slam_matches + main_matches
+        # Both feeds cover some of the same matches. Prefer the Slam point log.
+        by_id = {m["match_id"]: m for m in main_matches + slam_matches}
+        all_matches = list(by_id.values())
     print(f"\n  Total matches with PBP: {len(all_matches):,}")
 
     if not all_matches:
@@ -697,12 +471,12 @@ def main():
     features_df["match_date"] = pd.to_datetime(features_df["match_date"])
 
     print("\n=== Step 9: Time-based split ===")
-    train = features_df[features_df["match_date"] < TRAIN_CUTOFF]
+    train = features_df[features_df["match_date"] < train_end]
     val = features_df[
-        (features_df["match_date"] >= TRAIN_CUTOFF)
-        & (features_df["match_date"] < VAL_CUTOFF)
+        (features_df["match_date"] >= train_end)
+        & (features_df["match_date"] < val_end)
     ]
-    test = features_df[features_df["match_date"] >= VAL_CUTOFF]
+    test = features_df[features_df["match_date"] >= val_end]
 
     print(f"  Train: {len(train):,} points")
     if not train.empty:

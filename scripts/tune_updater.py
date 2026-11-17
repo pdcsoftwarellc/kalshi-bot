@@ -4,8 +4,7 @@
 Grid searches over virtual_sample_size and decay_rate, evaluating
 match-level log-loss at multiple checkpoints during each match.
 
-Also simulates point-level edge tracking to assess the model's
-suitability for high-frequency trading.
+Evaluates predictive accuracy at pre-point score snapshots.
 
 Usage:
     python scripts/tune_updater.py [--artifacts-dir PATH] [--val-data PATH]
@@ -22,12 +21,12 @@ from sklearn.metrics import log_loss
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tennis.features import FEATURE_COLUMNS, build_pre_match_features, combine_features, TOUR_AVERAGES
+from tennis.features import FEATURE_COLUMNS
+from tennis.research import labeled_starts, opening_state
 from tennis.model import PointWinModel
-from tennis.calibration import MatchWinCalibrator
 from tennis.markov import match_win_prob
 from tennis.updater import BayesianUpdater
-from tennis.types import MatchFormat, MatchState
+from tennis.types import MatchFormat
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
 ARTIFACTS_DIR = Path(__file__).parent.parent / "data" / "artifacts"
@@ -39,7 +38,6 @@ DECAY_VALUES = [0.99, 0.995, 0.999, 1.0]
 
 def simulate_match(
     model: PointWinModel,
-    calibrator: MatchWinCalibrator,
     match_df: pd.DataFrame,
     match_format: MatchFormat,
     vss: int,
@@ -59,74 +57,28 @@ def simulate_match(
 
     updater = BayesianUpdater(p_serve_prior=p_prior, virtual_sample_size=vss, decay_rate=decay)
 
-    state = MatchState(
-        sets_p1=0, sets_p2=0, games_p1=0, games_p2=0,
-        points_p1=0, points_p2=0, server=0,
-        match_format=match_format,
-    )
-
+    required = {"server", "best_of", "points_p1", "points_p2"}
+    if not required.issubset(match_df.columns):
+        raise ValueError("Rebuild the feature parquet to obtain pre-point score snapshots.")
     results = {}
-    for pt_idx, (_, row) in enumerate(match_df.iterrows()):
-        server_won = bool(row["server_won"])
-        updater.update(server_won)
-
-        n_obs = pt_idx + 1
+    for n_obs, (_, row) in enumerate(match_df.iterrows()):
+        # Predict using the observed score and previous n_obs outcomes.
         if n_obs in CHECKPOINTS:
-            p_serve = float(np.clip(updater.posterior_mean, 0.01, 0.99))
-            raw_prob = match_win_prob(state, p_serve)
-            cal_prob = float(np.clip(calibrator.calibrate(raw_prob), 1e-6, 1 - 1e-6))
-            results[n_obs] = cal_prob
+            state = opening_state(row, match_format)
+            p1_serves = state.server == 0
+            state.sets_p1 = int(row.sets_server if p1_serves else row.sets_returner)
+            state.sets_p2 = int(row.sets_returner if p1_serves else row.sets_server)
+            state.games_p1 = int(row.games_server if p1_serves else row.games_returner)
+            state.games_p2 = int(row.games_returner if p1_serves else row.games_server)
+            state.points_p1, state.points_p2 = int(row.points_p1), int(row.points_p2)
+            state.is_tiebreak = bool(row.is_tiebreak)
+            raw = match_win_prob(state, float(updater.posterior_mean))
+            results[n_obs] = float(np.clip(raw, 1e-6, 1 - 1e-6))
+        if n_obs >= CHECKPOINTS[-1]:
+            break
+        updater.update(bool(row.server_won))
 
     return results
-
-
-def evaluate_edge_profile(
-    model: PointWinModel,
-    calibrator: MatchWinCalibrator,
-    match_df: pd.DataFrame,
-    match_format: MatchFormat,
-    vss: int,
-    decay: float,
-    true_outcome: int,
-) -> list[float]:
-    """Simulate the engine and compute edge (model_prob - fair_price) at each point.
-
-    For edge analysis: assumes fair market price = true probability.
-    Returns list of edge values (positive = model correctly sees value).
-    """
-    match_df = match_df.sort_values("point_idx")
-    if len(match_df) < 10:
-        return []
-
-    X_first = match_df[FEATURE_COLUMNS].values[:1].astype(np.float32)
-    p_prior = float(np.clip(model.predict_proba(X_first)[0], 0.01, 0.99))
-
-    updater = BayesianUpdater(p_serve_prior=p_prior, virtual_sample_size=vss, decay_rate=decay)
-
-    state = MatchState(
-        sets_p1=0, sets_p2=0, games_p1=0, games_p2=0,
-        points_p1=0, points_p2=0, server=0,
-        match_format=match_format,
-    )
-
-    edges = []
-    for _, row in match_df.iterrows():
-        server_won = bool(row["server_won"])
-        updater.update(server_won)
-
-        p_serve = float(np.clip(updater.posterior_mean, 0.01, 0.99))
-        raw_prob = match_win_prob(state, p_serve)
-        cal_prob = float(np.clip(calibrator.calibrate(raw_prob), 1e-6, 1 - 1e-6))
-
-        # Edge: how much the model favors the correct side
-        if true_outcome == 1:
-            edge = cal_prob - 0.5  # positive if model correctly favors p1
-        else:
-            edge = (1 - cal_prob) - 0.5
-
-        edges.append(edge)
-
-    return edges
 
 
 def main():
@@ -138,7 +90,7 @@ def main():
 
     print("=== Loading artifacts ===")
     model = PointWinModel.load(os.path.join(args.artifacts_dir, "gbdt_model.pkl"))
-    calibrator = MatchWinCalibrator.load(os.path.join(args.artifacts_dir, "calibrator.pkl"))
+    # Score raw probabilities; the calibrator was fitted on part of this validation data.
 
     print("=== Loading validation data ===")
     val_df = pd.read_parquet(args.val_data)
@@ -154,17 +106,8 @@ def main():
     match_ids = list(match_groups.keys())[:args.max_matches]
     print(f"  Evaluating {len(match_ids)} matches")
 
-    # Determine outcomes
-    match_outcomes = {}
-    for mid in match_ids:
-        g = match_groups[mid]
-        if "match_winner" in g.columns:
-            mw = g["match_winner"].iloc[0]
-            if mw == 0:
-                continue
-            match_outcomes[mid] = int(mw == 1)
-        else:
-            match_outcomes[mid] = int(g["server_won"].mean() > 0.5)
+    starts = labeled_starts(val_df)
+    match_outcomes = starts.set_index("match_id").match_winner.eq(1).astype(int).to_dict()
 
     match_ids = [mid for mid in match_ids if mid in match_outcomes]
     match_format = MatchFormat.best_of_3_tiebreak()
@@ -179,7 +122,7 @@ def main():
 
         for mid in match_ids:
             g = match_groups[mid]
-            cp_results = simulate_match(model, calibrator, g, match_format, vss, decay)
+            cp_results = simulate_match(model, g, match_format, vss, decay)
             outcome = match_outcomes[mid]
             for cp, prob in cp_results.items():
                 checkpoint_probs[cp].append(prob)
@@ -190,12 +133,14 @@ def main():
         n_checkpoints = 0
         for cp in CHECKPOINTS:
             if len(checkpoint_probs[cp]) >= 10:
-                ll = log_loss(checkpoint_outcomes[cp], checkpoint_probs[cp])
+                ll = log_loss(checkpoint_outcomes[cp], checkpoint_probs[cp], labels=[0, 1])
                 row[f"logloss_at_{cp}"] = ll
                 total_ll += ll
                 n_checkpoints += 1
 
-        row["avg_logloss"] = total_ll / max(n_checkpoints, 1)
+        if not n_checkpoints:
+            raise ValueError("Need at least ten labeled matches reaching a checkpoint.")
+        row["avg_logloss"] = total_ll / n_checkpoints
         results.append(row)
         print(f"  vss={vss:3d}  decay={decay:.3f}  avg_logloss={row['avg_logloss']:.4f}")
 
@@ -206,26 +151,6 @@ def main():
     print(f"  virtual_sample_size = {int(best['vss'])}")
     print(f"  decay_rate = {best['decay']}")
     print(f"  avg log-loss = {best['avg_logloss']:.4f}")
-
-    # Edge profile analysis with best parameters
-    print(f"\n=== Edge Profile Analysis (best params) ===")
-    best_vss = int(best["vss"])
-    best_decay = float(best["decay"])
-
-    all_edges = []
-    for mid in match_ids[:100]:
-        g = match_groups[mid]
-        outcome = match_outcomes[mid]
-        edges = evaluate_edge_profile(model, calibrator, g, match_format, best_vss, best_decay, outcome)
-        all_edges.extend(edges)
-
-    if all_edges:
-        edges_arr = np.array(all_edges)
-        print(f"  Total edge observations: {len(edges_arr):,}")
-        print(f"  Mean edge: {edges_arr.mean():.4f}")
-        print(f"  Std edge: {edges_arr.std():.4f}")
-        print(f"  Edge > 0 (correct direction): {(edges_arr > 0).mean()*100:.1f}%")
-        print(f"  Sharpe-like (mean/std): {edges_arr.mean() / max(edges_arr.std(), 1e-6):.3f}")
 
     # Save
     csv_path = os.path.join(args.artifacts_dir, "updater_tuning.csv")

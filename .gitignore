@@ -10,5 +10,17 @@ build/
 *.ubj
 *.pkl
 *.parquet
+.venv/
 .env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+data/*.db
+data/*.db-*
+data/*.sqlite*
+data/trade_log.json
+*.log
+.mplconfig/
 notebooks/.ipynb_checkpoints/

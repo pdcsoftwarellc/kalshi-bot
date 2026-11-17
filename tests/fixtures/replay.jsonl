@@ -1,0 +1,5 @@
+{"kind":"quote","ts_ms":1000,"ticker":"EXAMPLE","yes_bid":45,"yes_ask":50,"ask_size":25,"bid_size":20}
+{"kind":"prediction","ts_ms":1010,"ticker":"EXAMPLE","model_prob":0.80,"confidence":0.85,"points_observed":15}
+{"kind":"quote","ts_ms":1210,"ticker":"EXAMPLE","yes_bid":45,"yes_ask":49,"ask_size":20,"bid_size":20}
+{"kind":"quote","ts_ms":1300,"ticker":"EXAMPLE","yes_bid":46,"yes_ask":50,"ask_size":3,"bid_size":20}
+{"kind":"settlement","ts_ms":5000,"ticker":"EXAMPLE","yes_cents":100}

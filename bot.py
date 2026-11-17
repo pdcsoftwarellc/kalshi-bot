@@ -28,6 +28,7 @@ from integration.kalshi_client import KalshiClient, HybridKalshiClient, KalshiEr
 from integration.market_finder import MarketFinder, MarketMatch
 from integration.match_tracker import MatchTracker
 from integration.player_resolver import PlayerResolver
+from integration.preflight import startup_errors
 from integration.risk import RiskManager
 from integration.tennis_feed import PointEvent, TennisFeed
 from tennis.engine import PredictionEngine
@@ -66,6 +67,24 @@ class TradingBot:
         self._bot_state: BotState | None = None
         self._hub: BroadcastHub | None = None
         self._guard: TradingGuard | None = None
+
+    def _create_kalshi_client(self):
+        if self.paper:
+            # Paper fills happen in _execute_signal. Never load credentials.
+            return KalshiClient(api_key="", private_key_path="", demo=False)
+        if self.demo and config.HYBRID_PRICING and config.PROD_KALSHI_API_KEY:
+            return HybridKalshiClient(
+                prod_api_key=config.PROD_KALSHI_API_KEY,
+                prod_key_path=config.PROD_KALSHI_PRIVATE_KEY_PATH,
+                demo_api_key=config.DEMO_KALSHI_API_KEY,
+                demo_key_path=config.DEMO_KALSHI_PRIVATE_KEY_PATH,
+            )
+        return KalshiClient(
+            api_key=config.DEMO_KALSHI_API_KEY if self.demo else config.KALSHI_API_KEY,
+            private_key_path=(config.DEMO_KALSHI_PRIVATE_KEY_PATH if self.demo
+                              else config.KALSHI_PRIVATE_KEY_PATH),
+            demo=self.demo,
+        )
 
     async def start(self) -> None:
         """Load artifacts, wire components, and run the main loop."""
@@ -115,27 +134,7 @@ class TradingBot:
         )
 
         # ── Kalshi client ──────────────────────────────────────────────
-        if config.HYBRID_PRICING and config.PROD_KALSHI_API_KEY:
-            log.info("Using hybrid client: production prices + demo trading")
-            self._kalshi = HybridKalshiClient(
-                prod_api_key=config.PROD_KALSHI_API_KEY,
-                prod_key_path=config.PROD_KALSHI_PRIVATE_KEY_PATH,
-                demo_api_key=config.DEMO_KALSHI_API_KEY,
-                demo_key_path=config.DEMO_KALSHI_PRIVATE_KEY_PATH,
-            )
-        else:
-            if self.demo and config.DEMO_KALSHI_API_KEY:
-                kalshi_key = config.DEMO_KALSHI_API_KEY
-                kalshi_pem = config.DEMO_KALSHI_PRIVATE_KEY_PATH
-            else:
-                kalshi_key = config.KALSHI_API_KEY
-                kalshi_pem = config.KALSHI_PRIVATE_KEY_PATH
-
-            self._kalshi = KalshiClient(
-                api_key=kalshi_key,
-                private_key_path=kalshi_pem,
-                demo=self.demo,
-            )
+        self._kalshi = self._create_kalshi_client()
 
         # ── Market finder ──────────────────────────────────────────────
         self._market_finder = MarketFinder(
@@ -268,7 +267,7 @@ class TradingBot:
             min_confidence=bs.min_confidence,
             min_points=bs.min_points_observed,
             net_edge_min=config.NET_EDGE_MIN_DOLLARS,
-            max_contracts=bs.max_contracts_per_match,
+            max_contracts=min(config.MAX_CONTRACTS_PER_SIGNAL, bs.max_contracts_per_match),
             fee_per_contract=config.KALSHI_FEE_PER_CONTRACT,
         )
 
@@ -445,22 +444,11 @@ def main():
     paper = not args.live
     demo = not args.prod
 
-    if not paper:
-        if demo:
-            api_key = config.DEMO_KALSHI_API_KEY or config.KALSHI_API_KEY
-            key_path = config.DEMO_KALSHI_PRIVATE_KEY_PATH or config.KALSHI_PRIVATE_KEY_PATH
-        else:
-            api_key = config.KALSHI_API_KEY
-            key_path = config.KALSHI_PRIVATE_KEY_PATH
-        if not api_key:
-            log.error("KALSHI_API_KEY (or DEMO_KALSHI_API_KEY) required for live trading")
-            sys.exit(1)
-        if not key_path:
-            log.error("KALSHI_PRIVATE_KEY_PATH (or DEMO_KALSHI_PRIVATE_KEY_PATH) required for live trading")
-            sys.exit(1)
-
-    if not config.API_TENNIS_KEY:
-        log.error("API_TENNIS_KEY required. Set it in your environment.")
+    errors = startup_errors(paper=paper, demo=demo)
+    if errors:
+        for error in errors:
+            log.error("%s", error)
+        log.error("Run python scripts/check_env.py for a complete environment check.")
         sys.exit(1)
 
     bot = TradingBot(paper=paper, demo=demo)

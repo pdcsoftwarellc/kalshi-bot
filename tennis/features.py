@@ -122,7 +122,7 @@ def build_player_stats(matches_df: pd.DataFrame) -> pd.DataFrame:
         for role, opp_role in [("w", "l"), ("l", "w")]:
             try:
                 svpt = float(row.get(f"{role}_svpt", 0) or 0)
-                if svpt == 0:
+                if not math.isfinite(svpt) or svpt <= 0:
                     continue
                 first_in = float(row.get(f"{role}_1stIn", 0) or 0)
                 first_won = float(row.get(f"{role}_1stWon", 0) or 0)
@@ -235,7 +235,7 @@ def build_pre_match_features(
     All features reflect knowledge available strictly before match_date.
     """
     date_ts = pd.Timestamp(match_date)
-    date_8d = match_date.replace("-", "")
+    date_8d = "00000000" if pd.isna(date_ts) else (date_ts - pd.Timedelta(days=1)).strftime("%Y%m%d")
 
     def get_stats(player_id: str) -> dict:
         if player_stats_df is None or player_stats_df.empty:
@@ -319,20 +319,10 @@ def build_pre_match_features(
 
 def build_inplay_features(state: MatchState) -> dict:
     """Compute dynamic in-play features from current MatchState."""
-    # Serve win percentages this match
-    if state.server == 0:
-        srv_played = state.serve_pts_played_p1
-        srv_won = state.serve_pts_won_p1
-        rtn_played = state.serve_pts_played_p2  # returner (p2) has served these
-        rtn_won = state.serve_pts_played_p2 - state.serve_pts_won_p2  # p1 won these returns
-    else:
-        srv_played = state.serve_pts_played_p2
-        srv_won = state.serve_pts_won_p2
-        rtn_played = state.serve_pts_played_p1
-        rtn_won = state.serve_pts_played_p1 - state.serve_pts_won_p1
-
-    match_srv_pct = srv_won / srv_played if srv_played > 0 else TOUR_AVERAGES["srv_total_won_pct"]
-    match_rtn_pct = rtn_won / rtn_played if rtn_played > 0 else TOUR_AVERAGES["rtn_won_pct"]
+    server_pct = state.server_serve_pct()
+    returner_pct = state.returner_return_pct()
+    match_srv_pct = TOUR_AVERAGES["srv_total_won_pct"] if server_pct is None else server_pct
+    match_rtn_pct = TOUR_AVERAGES["rtn_won_pct"] if returner_pct is None else returner_pct
 
     # Momentum: recent N points (server perspective)
     recent = state.recent_points

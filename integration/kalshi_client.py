@@ -1,11 +1,11 @@
-"""Kalshi REST client with RSA-PSS auth and token-bucket rate limiting.
+"""Kalshi REST client with RSA-PSS/Ed25519 auth and token-bucket rate limiting.
 
 Auth: RSA-PSS SHA-256, MGF1, salt_length=DIGEST_LENGTH
   Sign: f"{timestamp_ms}{METHOD}{/trade-api/v2/endpoint}"
   Headers: KALSHI-ACCESS-KEY, KALSHI-ACCESS-TIMESTAMP, KALSHI-ACCESS-SIGNATURE
 
-Production URL: https://api.elections.kalshi.com/trade-api/v2
-Demo URL: https://demo-api.kalshi.co/trade-api/v2
+Production URL: https://external-api.kalshi.com/trade-api/v2
+Demo URL: https://external-api.demo.kalshi.co/trade-api/v2
 
 Rate limits: 20 read/s, 10 write/s (basic tier)
 """
@@ -20,7 +20,9 @@ from urllib.parse import urlparse
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+
+import config
 
 log = logging.getLogger(__name__)
 
@@ -87,7 +89,7 @@ class KalshiClient:
 
     Args:
         api_key: Kalshi access key (UUID string).
-        private_key_path: Path to RSA private key PEM file.
+        private_key_path: RSA or Ed25519 PEM path, or empty for public data.
         demo: If True, use the demo environment.
     """
 
@@ -95,9 +97,9 @@ class KalshiClient:
         self._api_key = api_key
         self._private_key = self._load_key(private_key_path)
         self._base = (
-            "https://demo-api.kalshi.co/trade-api/v2"
+            config.KALSHI_DEMO_BASE
             if demo
-            else "https://api.elections.kalshi.com/trade-api/v2"
+            else config.KALSHI_PROD_BASE
         )
         self._path_prefix = "/trade-api/v2"
         self._read_bucket = _TokenBucket(rate=20.0)
@@ -106,12 +108,14 @@ class KalshiClient:
 
     @staticmethod
     def _load_key(path: str):
-        p = Path(path)
-        if not p.exists():
-            log.warning("Private key not found at %s — auth will fail on live calls", path)
+        if not path:
             return None
+        p = Path(path).expanduser()
         with open(p, "rb") as f:
-            return serialization.load_pem_private_key(f.read(), password=None)
+            key = serialization.load_pem_private_key(f.read(), password=None)
+        if not isinstance(key, (rsa.RSAPrivateKey, ed25519.Ed25519PrivateKey)):
+            raise ValueError("Kalshi requires an RSA or Ed25519 private key")
+        return key
 
     async def __aenter__(self):
         self._client = httpx.AsyncClient(timeout=10.0)
@@ -130,6 +134,9 @@ class KalshiClient:
         parsed = urlparse(path)
         path_only = parsed.path
         msg = f"{ts_ms}{method.upper()}{path_only}".encode()
+        if isinstance(self._private_key, ed25519.Ed25519PrivateKey):
+            sig = self._private_key.sign(msg)
+            return ts_ms, base64.b64encode(sig).decode()
         sig = self._private_key.sign(
             msg,
             padding.PSS(
@@ -141,8 +148,8 @@ class KalshiClient:
         return ts_ms, base64.b64encode(sig).decode()
 
     def _auth_headers(self, method: str, path: str) -> dict[str, str]:
-        if self._private_key is None:
-            return {}
+        if self._private_key is None or not self._api_key:
+            raise ValueError("Kalshi credentials are required for authenticated requests")
         ts, sig = self._sign(method, path)
         return {
             "KALSHI-ACCESS-KEY": self._api_key,

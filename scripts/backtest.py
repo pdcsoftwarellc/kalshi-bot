@@ -43,7 +43,7 @@ from tennis.elo import EloTracker, elo_baseline_win_prob
 from tennis.markov import match_win_prob
 from tennis.types import MatchFormat, MatchState
 from tennis.engine import PredictionEngine
-from tennis.updater import BayesianUpdater
+from tennis.research import opening_predictions, opening_state
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
 ARTIFACTS_DIR = Path(__file__).parent.parent / "data" / "artifacts"
@@ -59,29 +59,13 @@ def evaluate_point_level(
     model: PointWinModel,
     X_test: np.ndarray,
     y_test: np.ndarray,
-    calibrator: MatchWinCalibrator,
 ) -> dict:
     """Evaluate GBDT point-win predictions."""
     p_raw = model.predict_proba(X_test)
-    p_cal = calibrator.calibrate_batch(p_raw)
-
-    ll_raw = log_loss(y_test, p_raw)
-    ll_cal = log_loss(y_test, p_cal)
+    ll_raw = log_loss(y_test, p_raw, labels=[0, 1])
     bs_raw = brier_score_loss(y_test, p_raw)
-    bs_cal = brier_score_loss(y_test, p_cal)
-
-    print(f"\n--- Point-level metrics (n={len(y_test):,}) ---")
-    print(f"  Log-loss (raw):      {ll_raw:.4f}")
-    print(f"  Log-loss (cal):      {ll_cal:.4f}")
-    print(f"  Brier score (raw):   {bs_raw:.4f}")
-    print(f"  Brier score (cal):   {bs_cal:.4f}")
-
-    return {
-        "point_logloss_raw": ll_raw,
-        "point_logloss_cal": ll_cal,
-        "point_brier_raw": bs_raw,
-        "point_brier_cal": bs_cal,
-    }
+    print(f"Point predictions ({len(y_test):,} points): log-loss={ll_raw:.4f}, Brier={bs_raw:.4f}")
+    return {"point_logloss_raw": ll_raw, "point_brier_raw": bs_raw}
 
 
 def evaluate_match_level(
@@ -92,62 +76,18 @@ def evaluate_match_level(
     elo_tracker: EloTracker,
 ) -> dict:
     """Evaluate match-level predictions on test set."""
-    if "match_id" not in test_df.columns:
-        print("  Skipping match-level evaluation (no match_id column)")
+    starts, raw = opening_predictions(model, test_df, match_format)
+    if starts.empty:
+        print("  No recorded winners for match-level evaluation.")
         return {}
 
-    match_probs_raw = []
-    match_probs_elo = []
-    match_probs_constant = []
-    match_outcomes = []
-
-    for match_id, group in test_df.groupby("match_id"):
-        group = group.sort_values("point_idx")
-        if len(group) < 5:
-            continue
-
-        # Match outcome: use actual winner if available (check first to avoid orphan probs)
-        if "match_winner" in group.columns:
-            mw = group["match_winner"].iloc[0]
-            if mw == 0:
-                continue  # unknown winner, skip
-            outcome = int(mw == 1)
-        else:
-            outcome = int(group["server_won"].mean() > 0.5)
-
-        # GBDT + Markov chain prediction at match start
-        X_first = group[FEATURE_COLUMNS].values[:1].astype(np.float32)
-        p_serve_gbdt = float(model.predict_proba(X_first)[0])
-
-        state = MatchState(
-            sets_p1=0, sets_p2=0,
-            games_p1=0, games_p2=0,
-            points_p1=0, points_p2=0,
-            server=0,
-            match_format=match_format,
-        )
-        raw_prob = match_win_prob(state, p_serve_gbdt)
-        match_probs_raw.append(raw_prob)
-
-        # ELO baseline: use elo_diff feature
-        elo_diff = float(group["elo_diff"].iloc[0])
-        elo_prob = elo_baseline_win_prob(elo_diff)
-        match_probs_elo.append(elo_prob)
-
-        # Constant p=0.63 baseline
-        const_prob = match_win_prob(state, 0.63)
-        match_probs_constant.append(const_prob)
-
-        match_outcomes.append(outcome)
-
-    if not match_probs_raw:
-        print("  No matches to evaluate.")
-        return {}
-
-    raw = np.array(match_probs_raw)
-    elo = np.array(match_probs_elo)
-    const = np.array(match_probs_constant)
-    outcomes = np.array(match_outcomes)
+    outcomes = starts.match_winner.eq(1).to_numpy(dtype=int)
+    elo, const = [], []
+    for _, row in starts.iterrows():
+        state = opening_state(row, match_format)
+        diff_p1 = row.elo_diff if state.server == 0 else -row.elo_diff
+        elo.append(elo_baseline_win_prob(diff_p1))
+        const.append(match_win_prob(state, 0.63))
     cal = calibrator.calibrate_batch(raw)
 
     # Clamp probabilities to avoid infinite log-loss
@@ -156,10 +96,10 @@ def evaluate_match_level(
     elo = np.clip(elo, 1e-6, 1 - 1e-6)
     const = np.clip(const, 1e-6, 1 - 1e-6)
 
-    ll_raw = log_loss(outcomes, raw)
-    ll_cal = log_loss(outcomes, cal)
-    ll_elo = log_loss(outcomes, elo)
-    ll_const = log_loss(outcomes, const)
+    ll_raw = log_loss(outcomes, raw, labels=[0, 1])
+    ll_cal = log_loss(outcomes, cal, labels=[0, 1])
+    ll_elo = log_loss(outcomes, elo, labels=[0, 1])
+    ll_const = log_loss(outcomes, const, labels=[0, 1])
 
     bs_raw = brier_score_loss(outcomes, raw)
     bs_cal = brier_score_loss(outcomes, cal)
@@ -168,7 +108,7 @@ def evaluate_match_level(
 
     ece_cal = MatchWinCalibrator().expected_calibration_error(cal, outcomes)
 
-    n_matches = len(match_outcomes)
+    n_matches = len(outcomes)
     print(f"\n--- Match-level metrics (n={n_matches:,} matches) ---")
     print(f"{'Model':<25} {'Log-loss':>10} {'Brier':>10}")
     print(f"  {'GBDT+Markov (raw)':<23} {ll_raw:>10.4f} {bs_raw:>10.4f}")
@@ -196,11 +136,11 @@ def evaluate_match_level(
     }
 
 
-def evaluate_inference_latency(engine: PredictionEngine) -> dict:
+def evaluate_inference_latency(engine: PredictionEngine, samples: int = 1000) -> dict:
     """Measure engine.predict() latency over 1000 random states."""
     rng = np.random.default_rng(42)
     states = []
-    for _ in range(1000):
+    for _ in range(samples):
         state = MatchState(
             sets_p1=int(rng.integers(0, 2)),
             sets_p2=int(rng.integers(0, 2)),
@@ -229,7 +169,7 @@ def evaluate_inference_latency(engine: PredictionEngine) -> dict:
     p95 = np.percentile(latencies, 95)
     p99 = np.percentile(latencies, 99)
 
-    print(f"\n--- Inference latency (n=1000 states) ---")
+    print(f"\n--- Inference latency (n={samples} states) ---")
     print(f"  p50: {p50:.2f}ms")
     print(f"  p95: {p95:.2f}ms")
     print(f"  p99: {p99:.2f}ms")
@@ -266,7 +206,10 @@ def main():
     parser.add_argument("--artifacts-dir", default=str(ARTIFACTS_DIR))
     parser.add_argument("--test-data", default=str(PROCESSED_DIR / "features_test.parquet"))
     parser.add_argument("--plots-dir", default="plots")
+    parser.add_argument("--latency-samples", type=int, default=1000, help="Use zero to skip benchmarking")
     args = parser.parse_args()
+    if args.latency_samples < 0:
+        parser.error("--latency-samples cannot be negative")
 
     os.makedirs(args.plots_dir, exist_ok=True)
 
@@ -294,14 +237,14 @@ def main():
     y_test = test_df["server_won"].values.astype(np.float32)
 
     print("\n=== Evaluating point-level metrics ===")
-    point_metrics = evaluate_point_level(model, X_test, y_test, calibrator)
+    point_metrics = evaluate_point_level(model, X_test, y_test)
 
     print("\n=== Evaluating match-level metrics ===")
     match_format = MatchFormat.best_of_3_tiebreak()
     match_metrics = evaluate_match_level(model, calibrator, test_df, match_format, elo_tracker)
 
     print("\n=== Measuring inference latency ===")
-    latency_metrics = evaluate_inference_latency(engine)
+    latency_metrics = evaluate_inference_latency(engine, args.latency_samples) if args.latency_samples else {}
 
     if "probs_cal" in match_metrics:
         print("\n=== Generating calibration plots ===")

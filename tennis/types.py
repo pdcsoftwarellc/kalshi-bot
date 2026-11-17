@@ -104,16 +104,8 @@ class MatchState:
         """Fraction of return points won by current returner in this match.
         (= 1 - server's serve pct from the returner's perspective)
         """
-        if self.server == 0:
-            # returner is p2; p2's serve stats when they were serving
-            played = self.serve_pts_played_p2
-            won = self.serve_pts_played_p2 - self.serve_pts_won_p2
-        else:
-            played = self.serve_pts_played_p1
-            won = self.serve_pts_played_p1 - self.serve_pts_won_p1
-        if played == 0:
-            return None
-        return won / played
+        served = self.server_serve_pct()
+        return None if served is None else 1.0 - served
 
     def total_points_played(self) -> int:
         return self.serve_pts_played_p1 + self.serve_pts_played_p2

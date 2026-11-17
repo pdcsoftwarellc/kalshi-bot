@@ -22,7 +22,9 @@ from sklearn.metrics import log_loss
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tennis.features import FEATURE_COLUMNS
-from tennis.research import labeled_starts, opening_state
+from tennis.research import labeled_starts, serve_priors, score_state
+from tennis.engine import PredictionEngine
+from tennis.calibration import MatchWinCalibrator
 from tennis.model import PointWinModel
 from tennis.markov import match_win_prob
 from tennis.updater import BayesianUpdater
@@ -51,33 +53,21 @@ def simulate_match(
     if len(match_df) < 5:
         return {}
 
-    # Get initial p_serve from GBDT (first point features)
-    X_first = match_df[FEATURE_COLUMNS].values[:1].astype(np.float32)
-    p_prior = float(np.clip(model.predict_proba(X_first)[0], 0.01, 0.99))
-
-    updater = BayesianUpdater(p_serve_prior=p_prior, virtual_sample_size=vss, decay_rate=decay)
-
     required = {"server", "best_of", "points_p1", "points_p2"}
     if not required.issubset(match_df.columns):
         raise ValueError("Rebuild the feature parquet to obtain pre-point score snapshots.")
+    p1, p2 = serve_priors(model, match_df.iloc[:1])
+    engine = PredictionEngine(None, MatchWinCalibrator(), None, None, n_mc_samples=200, rng_seed=42)
+    engine.start_with_priors(p1[0], p2[0], int(match_df.iloc[0].server),
+                             virtual_sample_size=vss, decay_rate=decay)
     results = {}
-    for n_obs, (_, row) in enumerate(match_df.iterrows()):
-        # Predict using the observed score and previous n_obs outcomes.
-        if n_obs in CHECKPOINTS:
-            state = opening_state(row, match_format)
-            p1_serves = state.server == 0
-            state.sets_p1 = int(row.sets_server if p1_serves else row.sets_returner)
-            state.sets_p2 = int(row.sets_returner if p1_serves else row.sets_server)
-            state.games_p1 = int(row.games_server if p1_serves else row.games_returner)
-            state.games_p2 = int(row.games_returner if p1_serves else row.games_server)
-            state.points_p1, state.points_p2 = int(row.points_p1), int(row.points_p2)
-            state.is_tiebreak = bool(row.is_tiebreak)
-            raw = match_win_prob(state, float(updater.posterior_mean))
-            results[n_obs] = float(np.clip(raw, 1e-6, 1 - 1e-6))
-        if n_obs >= CHECKPOINTS[-1]:
+    for row in match_df.itertuples(index=False):
+        if row.point_idx in CHECKPOINTS:
+            result = engine.predict(score_state(row))
+            results[row.point_idx] = float(np.clip(result.raw_win_prob_p1, 1e-6, 1-1e-6))
+        if row.point_idx >= CHECKPOINTS[-1]:
             break
-        updater.update(bool(row.server_won))
-
+        engine.record_point(bool(row.server_won), int(row.server))
     return results
 
 

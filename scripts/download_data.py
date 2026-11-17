@@ -57,7 +57,7 @@ def clone_or_update(name: str, url: str, update: bool) -> bool:
     return True
 
 
-def download_fixtures(start: date, end: date, update: bool) -> None:
+def download_fixtures(start: date, end: date, update: bool, destination: Path | None = None) -> None:
     """Cache one complete API response (ATP singles only) per UTC day."""
     import httpx
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -65,7 +65,7 @@ def download_fixtures(start: date, end: date, update: bool) -> None:
 
     if not config.API_TENNIS_KEY:
         raise SystemExit("Set API_TENNIS_KEY before downloading fixtures.")
-    destination = Path(DATA_RAW_DIR) / "api_tennis"
+    destination = destination or Path(DATA_RAW_DIR) / "api_tennis"
     destination.mkdir(parents=True, exist_ok=True)
     day = start
     with httpx.Client(timeout=45) as client:
@@ -75,13 +75,14 @@ def download_fixtures(start: date, end: date, update: bool) -> None:
                 try:
                     response = client.get(config.API_TENNIS_REST, params={
                         "APIkey": config.API_TENNIS_KEY, "method": "get_fixtures",
-                        "date_start": str(day), "date_stop": str(day), "timezone": "UTC",
+                        "date_start": str(day), "date_stop": str(day), "timezone": "UTC", "event_type_key": 265,
                     })
                     response.raise_for_status()
                     payload = response.json()
-                    if str(payload.get("success")) != "1" or not isinstance(payload.get("result"), list):
+                    rows = payload.get("result", [])
+                    if str(payload.get("success")) != "1" or not isinstance(rows, list):
                         raise ValueError("Invalid fixtures response")
-                    fixtures = [m for m in payload["result"] if m["event_type_type"] == "Atp Singles"]
+                    fixtures = [m for m in rows if m["event_type_type"] == "Atp Singles"]
                 except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
                     raise SystemExit(f"{day}: fixture request failed ({type(exc).__name__}). Retry to resume.") from None
                 with tempfile.NamedTemporaryFile(mode="w", dir=destination, delete=False) as tmp:
@@ -98,13 +99,14 @@ def main():
     parser.add_argument("--repos", nargs="+", choices=list(REPOS), default=list(REPOS),
                         help="Which repos to download (default: all)")
     parser.add_argument("--source", choices=["legacy", "api-tennis"], default="legacy")
+    parser.add_argument("--fixtures-dir", type=Path, help="Destination for cached API-Tennis days")
     parser.add_argument("--start", type=date.fromisoformat)
     parser.add_argument("--end", type=date.fromisoformat)
     args = parser.parse_args()
     if args.source == "api-tennis":
         if not args.start or not args.end or args.start > args.end:
             parser.error("For api-tennis supply --start and --end in chronological order (YYYY-MM-DD).")
-        download_fixtures(args.start, args.end, args.update)
+        download_fixtures(args.start, args.end, args.update, args.fixtures_dir)
         return
     if args.start or args.end:
         parser.error("Date ranges apply to --source api-tennis.")

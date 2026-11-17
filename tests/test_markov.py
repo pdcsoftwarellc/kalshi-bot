@@ -87,9 +87,9 @@ class TestGameWinProbFromScore:
         assert abs(game_win_prob_from_score(0.6, 3, 3) - expected) < 1e-10
 
     def test_advantage_server(self):
-        """Server advantage (4,3): win = p."""
+        """A lost advantage point returns to deuce where the server can still win."""
         p = 0.65
-        assert abs(game_win_prob_from_score(p, 4, 3) - p) < 1e-10
+        assert game_win_prob_from_score(p, 4, 3) == pytest.approx(0.9213302752293577)
 
     def test_advantage_returner(self):
         """Returner advantage (3,4): win prob should be low."""

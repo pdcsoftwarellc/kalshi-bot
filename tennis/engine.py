@@ -19,14 +19,13 @@ Usage pattern (live match):
 from __future__ import annotations
 
 import os
-import time
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
 from tennis.types import MatchState, PredictionResult
-from tennis.markov import match_win_prob, match_win_prob_batch
+from tennis.markov import match_win_prob_batch
 from tennis.updater import BayesianUpdater
 from tennis.features import (
     build_pre_match_features,
@@ -97,8 +96,7 @@ class PredictionEngine:
         self._rng = np.random.default_rng(rng_seed)
 
         # Per-match state (reset by new_match())
-        self._updater: Optional[BayesianUpdater] = None
-        self._pre_match_features: Optional[dict] = None
+        self._updaters: tuple[BayesianUpdater, BayesianUpdater] | None = None
         self._current_server: Optional[int] = None  # server at match start
 
     # ------------------------------------------------------------------
@@ -114,44 +112,38 @@ class PredictionEngine:
         Args:
             state: Initial MatchState (typically sets/games/points all at 0).
         """
-        # Compute pre-match features (server = player who serves first)
-        server_id = state.player1_id if state.server == 0 else state.player2_id
-        returner_id = state.player2_id if state.server == 0 else state.player1_id
+        priors = []
+        for srv, rtn in ((state.player1_id, state.player2_id), (state.player2_id, state.player1_id)):
+            pre = build_pre_match_features(srv, rtn, state.surface, state.tournament_level,
+                                           state.match_date, self._player_stats, self._elo, self._h2h)
+            priors.append(self._serve_prior(pre))
+        self.start_with_priors(*priors, server=state.server)
 
-        self._pre_match_features = build_pre_match_features(
-            server_id=server_id,
-            returner_id=returner_id,
-            surface=state.surface,
-            tournament_level=state.tournament_level,
-            match_date=state.match_date,
-            player_stats_df=self._player_stats,
-            elo_tracker=self._elo,
-            h2h_df=self._h2h,
-        )
+    def _serve_prior(self, pre):
+        if self._model is None:
+            return TOUR_AVERAGES["srv_total_won_pct"]
+        blank = build_inplay_features(MatchState())
+        return float(np.clip(self._model.predict_single(combine_features(pre, blank)), 0.01, 0.99))
 
-        # Get GBDT prior for p_serve
-        p_prior = self._estimate_p_serve_prior(state)
+    def start_with_priors(self, p1: float, p2: float, server: int = 0, *,
+                          virtual_sample_size=None, decay_rate=1.0):
+        """Reset a match with the two pre-point predictions for its players."""
+        self._updaters = (BayesianUpdater(p1, virtual_sample_size, decay_rate),
+                          BayesianUpdater(p2, virtual_sample_size, decay_rate))
+        self._current_server = server
 
-        # Initialise Bayesian updater with GBDT prior
-        self._updater = BayesianUpdater(p_serve_prior=p_prior)
-        self._current_server = state.server
+    def record_point(self, server_won: bool, server: int | None = None) -> None:
+        """Attribute the outcome to the player who served the observed point.
 
-    def record_point(self, server_won: bool) -> None:
-        """Update the Bayesian updater with the outcome of the last point.
-
-        Call this AFTER predict() for each point, before updating the match
-        state and calling predict() again.
-
-        Args:
-            server_won: True if the server won the point, False otherwise.
+        For sequential callers, omitting server uses the server in the last
+        prediction. Feed and replay callers supply it explicitly at game changes.
         """
-        if self._updater is None:
+        if self._updaters is None:
             raise RuntimeError("Call new_match() before record_point().")
-        self._updater.update(server_won)
-
-    # ------------------------------------------------------------------
-    # Core prediction
-    # ------------------------------------------------------------------
+        serving = self._current_server if server is None else server
+        if serving not in (0, 1):
+            raise ValueError("Server must be player 0 or 1")
+        self._updaters[serving].update(server_won)
 
     def predict(self, state: MatchState) -> PredictionResult:
         """Return the current match win probability and confidence estimate.
@@ -166,27 +158,23 @@ class PredictionEngine:
             PredictionResult with win_prob_p1, confidence, CI bounds, and
             the current p_serve estimate.
         """
-        if self._updater is None:
+        if self._updaters is None:
             # Auto-initialise if new_match was not called (convenience for testing)
             self.new_match(state)
 
-        # 1. Get posterior p_serve estimate from Bayesian updater.
-        #    The updater already handles the transition from prior (GBDT) to data
-        #    via its Beta distribution + optional decay. No separate blend needed.
-        #    Per Klaassen & Magnus (2001), the updater's decay mechanism adapts
-        #    to within-match performance shifts more cleanly than a linear blend.
-        p_serve_posterior = self._updater.posterior_mean
-        p_serve_posterior = float(np.clip(p_serve_posterior, 0.01, 0.99))
-
-        # 3. Monte Carlo: sample p_serve from posterior, compute match win prob
-        p_samples = self._updater.sample(n=self.n_mc_samples, rng=self._rng)
-        win_probs = match_win_prob_batch(state, p_samples)
+        self._current_server = state.server
+        current = self._updaters[state.server]
+        other = self._updaters[1-state.server]
+        p_serve_posterior = current.posterior_mean
+        win_probs = match_win_prob_batch(
+            state, current.sample(n=self.n_mc_samples, rng=self._rng),
+            other.sample(n=self.n_mc_samples, rng=self._rng),
+        )
 
         # 4. Summarise MC distribution
         win_prob_raw = float(np.mean(win_probs))
         ci_lower = float(np.percentile(win_probs, 2.5))
         ci_upper = float(np.percentile(win_probs, 97.5))
-        confidence = float(1.0 - (ci_upper - ci_lower))
 
         # 5. Calibrate the mean win probability
         win_prob_cal = self._calibrator.calibrate(win_prob_raw)
@@ -201,54 +189,20 @@ class PredictionEngine:
         return PredictionResult(
             win_prob_p1=win_prob_cal,
             win_prob_p2=1.0 - win_prob_cal,
-            confidence=confidence,
+            confidence=float(1.0 - (ci_upper_cal - ci_lower_cal)),
             ci_lower=ci_lower_cal,
             ci_upper=ci_upper_cal,
             p_serve_estimate=p_serve_posterior,
-            points_observed=self._updater.n_observed,
+            points_observed=current.n_observed + other.n_observed,
+            raw_win_prob_p1=win_prob_raw,
         )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _estimate_p_serve_prior(self, state: MatchState) -> float:
-        """Get initial p_serve estimate using pre-match GBDT features."""
-        if self._model is None or self._pre_match_features is None:
-            return TOUR_AVERAGES["srv_total_won_pct"]
-
-        # Use zero in-play features for the prior (match hasn't started)
-        inplay_zero = {
-            "match_srv_pts_won_pct": TOUR_AVERAGES["srv_total_won_pct"],
-            "match_rtn_pts_won_pct": TOUR_AVERAGES["rtn_won_pct"],
-            "momentum_last5": 2.5,
-            "momentum_last10": 5.0,
-            "sets_server": 0.0,
-            "sets_returner": 0.0,
-            "games_server": 0.0,
-            "games_returner": 0.0,
-            "points_played_total": 0.0,
-            "is_tiebreak": 0.0,
-            "is_final_set": 0.0,
-        }
-        x = combine_features(self._pre_match_features, inplay_zero)
-        return float(np.clip(self._model.predict_single(x), 0.01, 0.99))
-
-    def _estimate_p_serve(self, state: MatchState) -> float:
-        """Get current p_serve estimate combining pre-match and in-play features."""
-        if self._model is None or self._pre_match_features is None:
-            return TOUR_AVERAGES["srv_total_won_pct"]
-
-        inplay = build_inplay_features(state)
-        x = combine_features(self._pre_match_features, inplay)
-        return float(np.clip(self._model.predict_single(x), 0.01, 0.99))
 
     # ------------------------------------------------------------------
     # Loading from artifacts directory
     # ------------------------------------------------------------------
 
     @classmethod
-    def load(cls, artifacts_dir: str, n_mc_samples: int = 500) -> PredictionEngine:
+    def load(cls, artifacts_dir: str, n_mc_samples: int = 500, rng_seed: int | None = None) -> PredictionEngine:
         """Load a trained PredictionEngine from saved artifacts.
 
         Expected files in artifacts_dir:
@@ -296,7 +250,7 @@ class PredictionEngine:
             elo_tracker=elo_tracker,
             player_stats_df=player_stats,
             h2h_df=h2h,
-            n_mc_samples=n_mc_samples,
+            n_mc_samples=n_mc_samples, rng_seed=rng_seed,
         )
 
     @classmethod
@@ -307,7 +261,7 @@ class PredictionEngine:
         elo_tracker=None,
         player_stats_df=None,
         h2h_df=None,
-        n_mc_samples: int = 500,
+        n_mc_samples: int = 500, rng_seed: int | None = None,
     ) -> PredictionEngine:
         """Construct engine from already-loaded components (useful for testing)."""
         if elo_tracker is None:
@@ -319,5 +273,5 @@ class PredictionEngine:
             elo_tracker=elo_tracker,
             player_stats_df=player_stats_df,
             h2h_df=h2h_df,
-            n_mc_samples=n_mc_samples,
+            n_mc_samples=n_mc_samples, rng_seed=rng_seed,
         )

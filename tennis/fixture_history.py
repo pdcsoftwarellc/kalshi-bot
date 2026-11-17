@@ -14,6 +14,8 @@ PLAYERS = {"First Player": 1, "Second Player": 2}
 
 
 def _pair(score):
+    if not isinstance(score, str):
+        raise ValueError("missing score")
     left, right = score.split("-")
     return int(left), int(right)
 
@@ -44,7 +46,7 @@ def _point_winners(game, server, game_winner, tiebreak, target):
     for idx, point in enumerate(game["points"], 1):
         if int(point["number_point"]) != idx or completed(score):
             raise ValueError("nonsequential point log")
-        shown = tuple(v.strip().upper().replace("AD", "A") for v in point["score"].split("-"))
+        shown = tuple(v.strip().upper().replace("AD", "A") for v in str(point["score"]).split("-"))
         for i in (0, 1):
             candidate = score.copy()
             candidate[i] += 1
@@ -53,6 +55,8 @@ def _point_winners(game, server, game_winner, tiebreak, target):
                 break
         else:
             raise ValueError("missing or ambiguous point score")
+    if game_winner is None:
+        return points
     # Standard game logs omit the winning point. Infer exactly one only
     # when the last observed score was game point for the recorded winner.
     if not completed(score):
@@ -69,7 +73,7 @@ def parse_fixture(m):
     major = name in MAJOR_SURFACES
     qualifying = str(m.get("event_qualification")).lower() in {"1", "true"}
     best_of = 5 if major and not qualifying else 3
-    scores = {int(s["score_set"]): tuple(int(s[key].split(".")[0]) for key in ("score_first", "score_second"))
+    scores = {int(s["score_set"]): tuple(int(str(s[key]).split(".")[0]) for key in ("score_first", "score_second"))
               for s in m["scores"]}
     sets = [0, 0]
     games = []

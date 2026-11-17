@@ -23,6 +23,7 @@ Metrics reported:
 Usage:
     python scripts/backtest.py [--artifacts-dir PATH] [--test-data PATH]
 """
+import json
 import argparse
 import os
 import sys
@@ -43,7 +44,7 @@ from tennis.elo import EloTracker, elo_baseline_win_prob
 from tennis.markov import match_win_prob
 from tennis.types import MatchFormat, MatchState
 from tennis.engine import PredictionEngine
-from tennis.research import opening_predictions, opening_state
+from tennis.research import opening_predictions, opening_state, checkpoint_predictions
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
 ARTIFACTS_DIR = Path(__file__).parent.parent / "data" / "artifacts"
@@ -231,6 +232,11 @@ def main():
 
     print("=== Loading test data ===")
     test_df = load_test_data(args.test_data)
+    metadata_path = Path(args.artifacts_dir) / "fit_metadata.json"
+    if metadata_path.is_file():
+        cutoff = json.loads(metadata_path.read_text())["calibration_through"]
+        if test_df.match_date.min() <= pd.Timestamp(cutoff):
+            raise ValueError(f"Test matches must start after calibration ended on {cutoff}")
     print(f"  Test set: {len(test_df):,} points, {test_df['match_date'].min()} – {test_df['match_date'].max()}")
 
     X_test = test_df[FEATURE_COLUMNS].values.astype(np.float32)
@@ -243,6 +249,21 @@ def main():
     match_format = MatchFormat.best_of_3_tiebreak()
     match_metrics = evaluate_match_level(model, calibrator, test_df, match_format, elo_tracker)
 
+    snapshots = checkpoint_predictions(model, test_df, calibrator, score_baseline=True)
+    snapshots.to_parquet(Path(args.plots_dir) / "checkpoint_predictions.parquet", index=False)
+    inplay_metrics = {}
+    for label, group in (("all", snapshots), ("inplay", snapshots[snapshots.points_observed > 0])):
+        if group.empty:
+            continue
+        weights = 1/group.groupby("match_id").match_id.transform("size")
+        scores = {"matches": group.match_id.nunique(), "snapshots": len(group)}
+        for col in ("raw", "prob", "score_only"):
+            scores[f"{col}_brier"] = brier_score_loss(group.outcome, group[col], sample_weight=weights)
+            scores[f"{col}_logloss"] = log_loss(group.outcome, group[col], sample_weight=weights, labels=[0,1])
+        scores["prediction_range"] = [float(group.prob.min()), float(group.prob.max())]
+        inplay_metrics[label] = scores
+    print("  Match-weighted checkpoint metrics:", inplay_metrics)
+    (Path(args.plots_dir) / "checkpoint_metrics.json").write_text(json.dumps(inplay_metrics, indent=2))
     print("\n=== Measuring inference latency ===")
     latency_metrics = evaluate_inference_latency(engine, args.latency_samples) if args.latency_samples else {}
 

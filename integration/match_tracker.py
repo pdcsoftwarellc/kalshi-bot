@@ -58,8 +58,9 @@ class MatchTracker:
         elo_tracker,
         player_stats_df: Optional[pd.DataFrame],
         h2h_df: Optional[pd.DataFrame],
-        resolver: PlayerResolver,
+        resolver: PlayerResolver | None,
         n_mc_samples: int = 200,
+        rng_seed: int | None = None,
     ) -> None:
         self._model = model
         self._calibrator = calibrator
@@ -68,6 +69,7 @@ class MatchTracker:
         self._h2h = h2h_df
         self._resolver = resolver
         self._n_mc = n_mc_samples
+        self._rng_seed = rng_seed
         self._sessions: dict[str, MatchSession] = {}
 
     def _get_or_create_session(self, event: PointEvent) -> Optional[MatchSession]:
@@ -76,15 +78,20 @@ class MatchTracker:
             return self._sessions[event.match_id]
 
         # Resolve player IDs
-        p1_id = self._resolver.resolve(event.player1_name)
-        p2_id = self._resolver.resolve(event.player2_name)
-        if p1_id is None or p2_id is None:
+        if getattr(self._calibrator, "player_id_source", None) == "api-tennis":
+            p1_id, p2_id = event.player1_key, event.player2_key
+        elif self._resolver is None:
+            raise ValueError("ATP-ID artifacts require a player resolver")
+        else:
+            p1_id = self._resolver.resolve(event.player1_name)
+            p2_id = self._resolver.resolve(event.player2_name)
+        if not p1_id or not p2_id:
             log.warning("Cannot resolve players: %s (%s) vs %s (%s) — skipping match %s",
                         event.player1_name, p1_id, event.player2_name, p2_id, event.match_id)
             return None
 
         # Determine match format from tournament level
-        if event.tournament_level == "G":
+        if event.best_of == 5 or (event.best_of is None and event.tournament_level == "G"):
             match_format = MatchFormat.best_of_5_tiebreak()
         else:
             match_format = MatchFormat.best_of_3_tiebreak()
@@ -107,7 +114,7 @@ class MatchTracker:
             elo_tracker=self._elo_tracker,
             player_stats_df=self._player_stats,
             h2h_df=self._h2h,
-            n_mc_samples=self._n_mc,
+            n_mc_samples=self._n_mc, rng_seed=self._rng_seed,
         )
 
         session = MatchSession(
@@ -129,6 +136,8 @@ class MatchTracker:
 
         Returns None if the match can't be tracked (unresolved players, etc.).
         """
+        if event.reset:
+            self.remove_session(event.match_id)
         session = self._get_or_create_session(event)
         if session is None:
             return None
@@ -140,10 +149,11 @@ class MatchTracker:
 
         # Record point outcome (if we know who won it)
         if event.server_won_last_point is not None:
-            session.engine.record_point(event.server_won_last_point)
+            server = event.server if event.point_server is None else event.point_server
+            session.engine.record_point(event.server_won_last_point, server)
 
             # Update in-match stats on the state
-            if event.server == 0:
+            if server == 0:
                 session.state.serve_pts_played_p1 += 1
                 if event.server_won_last_point:
                     session.state.serve_pts_won_p1 += 1
@@ -167,6 +177,9 @@ class MatchTracker:
         session.state.points_p2 = event.points_p2
         session.state.server = event.server
         session.state.is_tiebreak = event.is_tiebreak
+
+        if not event.actionable:
+            return None
 
         # Predict
         try:

@@ -125,6 +125,8 @@ class PredictionResult:
     p_serve_estimate: float  # posterior mean of server's point win probability
     points_observed: int     # total points played so far in match
 
+    raw_win_prob_p1: float | None = None  # before match-level calibration
+
     def __repr__(self) -> str:
         return (
             f"PredictionResult("

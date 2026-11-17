@@ -1,16 +1,7 @@
 """Probability calibration for the tennis win probability engine.
 
-Applies isotonic regression to correct systematic over/under-confidence in
-the raw Markov chain match win probability outputs.
-
-The calibrator is fitted on the validation set: for each point in each
-validation match, we record the model's predicted match win probability and
-the actual match outcome. Isotonic regression then learns a monotone mapping
-from raw probability to calibrated probability.
-
-References:
-    Zadrozny & Elkan (2002). "Transforming classifier scores into accurate
-    multiclass probability estimates." KDD.
+New models fit a symmetric log-odds slope on held-out in-play snapshots.
+The isotonic fit and loader remain available for earlier artifacts.
 """
 from __future__ import annotations
 
@@ -19,11 +10,13 @@ import pickle
 from typing import Optional
 
 import numpy as np
+from scipy.special import expit, logit
+from scipy.optimize import minimize_scalar
 from sklearn.isotonic import IsotonicRegression
 
 
 class MatchWinCalibrator:
-    """Isotonic regression calibrator for match win probabilities.
+    """Calibrate match probabilities using held-out labeled observations.
 
     Fits on (raw_prob, match_outcome) pairs from the validation set.
     At inference time, maps raw Markov chain probabilities to calibrated ones.
@@ -32,6 +25,8 @@ class MatchWinCalibrator:
     def __init__(self):
         self._calibrator: Optional[IsotonicRegression] = None
         self._fitted = False
+        self.slope = None
+        self.player_id_source = None
 
     # ------------------------------------------------------------------
     # Fitting
@@ -54,10 +49,35 @@ class MatchWinCalibrator:
 
         # Isotonic regression: y_min=0, y_max=1, increasing=True
         # out_of_bounds="clip" ensures extrapolation stays in [0, 1]
+        self.slope = None
         self._calibrator = IsotonicRegression(
             y_min=0.0, y_max=1.0, increasing=True, out_of_bounds="clip"
         )
         self._calibrator.fit(probs, outcomes)
+        self._fitted = True
+
+    # ------------------------------------------------------------------
+    def fit_inplay(self, probs, outcomes, weights):
+        """Fit a monotone odds slope. Equal total weight per match, no player-order bias.
+
+        A weak unit penalty on log(slope) favors identity for small samples.
+        A score of 0.5 stays 0.5 and exchanging players complements the result.
+        """
+        probs, outcomes, weights = (np.asarray(v, dtype=float) for v in (probs, outcomes, weights))
+        if (not probs.size or probs.ndim != 1 or not (probs.shape == outcomes.shape == weights.shape)
+                or not np.all((probs >= 0) & (probs <= 1))
+                or not np.all(np.isin(outcomes, (0, 1)))
+                or not np.all(np.isfinite(weights) & (weights > 0))):
+            raise ValueError("Expected aligned probabilities, binary outcomes and positive match weights")
+        logits = logit(np.clip(probs, 1e-7, 1-1e-7))
+        def loss(log_slope):
+            z = np.exp(log_slope) * logits
+            return float(weights @ (np.logaddexp(0, z) - outcomes*z)) + .5*log_slope**2
+        fit = minimize_scalar(loss, bounds=(-3., 3.), method="bounded")
+        if not fit.success:
+            raise ValueError("In-play calibration did not converge")
+        self.slope = float(np.exp(fit.x))
+        self._calibrator = None
         self._fitted = True
 
     # ------------------------------------------------------------------
@@ -75,12 +95,16 @@ class MatchWinCalibrator:
         """
         if not self._fitted:
             return prob  # No-op if not fitted yet
+        if self.slope is not None:
+            return float(expit(self.slope * logit(prob)))
         return float(self._calibrator.predict([prob])[0])
 
     def calibrate_batch(self, probs: np.ndarray) -> np.ndarray:
         """Batch calibration for arrays of probabilities."""
         if not self._fitted:
             return np.asarray(probs, dtype=np.float64)
+        if self.slope is not None:
+            return expit(self.slope * logit(probs))
         return self._calibrator.predict(probs).astype(np.float64)
 
     # ------------------------------------------------------------------
@@ -152,7 +176,8 @@ class MatchWinCalibrator:
         """Save calibrator to a pickle file."""
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "wb") as f:
-            pickle.dump({"calibrator": self._calibrator, "fitted": self._fitted}, f)
+            pickle.dump({"calibrator": self._calibrator, "fitted": self._fitted, "slope": self.slope,
+                         "player_id_source": self.player_id_source}, f)
 
     @classmethod
     def load(cls, path: str) -> MatchWinCalibrator:
@@ -162,4 +187,6 @@ class MatchWinCalibrator:
             data = pickle.load(f)
         obj._calibrator = data["calibrator"]
         obj._fitted = data["fitted"]
+        obj.slope = data.get("slope")
+        obj.player_id_source = data.get("player_id_source")
         return obj

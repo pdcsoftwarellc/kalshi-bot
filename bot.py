@@ -113,7 +113,8 @@ class TradingBot:
         h2h          = engine._h2h
 
         # ── Player resolver ────────────────────────────────────────────
-        resolver = PlayerResolver(config.ALIASES_PATH, config.ATP_RAW_DIR)
+        resolver = (None if calibrator.player_id_source == "api-tennis" else
+                    PlayerResolver(config.ALIASES_PATH, config.ATP_RAW_DIR))
 
         # ── Match tracker ──────────────────────────────────────────────
         self._match_tracker = MatchTracker(

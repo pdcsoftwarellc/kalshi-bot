@@ -361,6 +361,8 @@ def build_training_rows_from_matches(
             rows.append({
                 **dict(zip(FEATURE_COLUMNS, features)),
                 "server_won": won, "match_date": match["match_date"],
+                "player1_id": p1, "player2_id": p2, "surface": match["surface"],
+                "tournament_level": match["tourney_level"],
                 "match_id": match["match_id"], "match_winner": match.get("winner", 0),
                 "point_idx": idx, "server": state.server, "best_of": match["best_of"],
                 "points_p1": state.points_p1, "points_p2": state.points_p2,
@@ -468,6 +470,7 @@ def main():
         print("  ERROR: No training rows generated.")
         sys.exit(1)
 
+    features_df["player_id_source"] = "api-tennis" if args.fixtures_dir else "atp"
     features_df["match_date"] = pd.to_datetime(features_df["match_date"])
 
     print("\n=== Step 9: Time-based split ===")

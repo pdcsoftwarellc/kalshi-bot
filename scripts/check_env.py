@@ -118,11 +118,13 @@ def main() -> int:
                 print(f"[FAIL] {prefix} credentials are incomplete or the PEM is invalid.")
                 passed = False
 
+    uses_provider_ids = False
     artifacts = Path(cfg.ARTIFACTS_DIR)
     if all((artifacts / name).is_file() for name in REQUIRED_ARTIFACTS):
         try:
             from tennis.engine import PredictionEngine
-            PredictionEngine.load(str(artifacts))
+            engine = PredictionEngine.load(str(artifacts))
+            uses_provider_ids = engine._calibrator.player_id_source == "api-tennis"
             print("[OK] Trained model artifacts load successfully.")
         except Exception as exc:
             print(f"[FAIL] Model artifacts cannot be loaded ({type(exc).__name__}).")
@@ -130,7 +132,7 @@ def main() -> int:
     for name in SUPPORTING_ARTIFACTS:
         if not (artifacts / name).is_file():
             print(f"[WARN] Missing {name}; engine would use incomplete player history.")
-    if not any(Path(cfg.ATP_RAW_DIR).glob("atp_matches_*.csv")):
+    if not uses_provider_ids and not any(Path(cfg.ATP_RAW_DIR).glob("atp_matches_*.csv")):
         print("[WARN] Raw ATP match data is missing; player resolution is limited to aliases.")
 
     if args.online:

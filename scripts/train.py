@@ -5,14 +5,15 @@ Steps:
 1. Load train/val parquet feature files
 2. Train XGBoost (and optionally LightGBM) with early stopping on val log-loss
 3. Compute match-level win probability predictions on val set using the
-   full pipeline (GBDT → Markov chain)
-4. Fit isotonic regression calibrator on val set predictions
+   deployed pipeline (two serve priors → Bayesian posteriors → match probability)
+4. Fit symmetric odds calibration on later validation score snapshots
 5. Save artifacts: gbdt_model.pkl, calibrator.pkl
 
 Usage:
     python scripts/train.py [--backend xgboost|lightgbm]
 """
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -25,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tennis.features import FEATURE_COLUMNS
 from tennis.model import PointWinModel
 from tennis.calibration import MatchWinCalibrator
-from tennis.research import opening_predictions
+from tennis.research import opening_predictions, checkpoint_predictions
 from tennis.types import MatchFormat
 
 PROCESSED_DIR = Path(__file__).parent.parent / "data" / "processed"
@@ -73,6 +74,12 @@ def main():
     val_df = pd.read_parquet(val_path)
     val_df["match_date"] = pd.to_datetime(val_df["match_date"])
 
+    train_dates = pd.to_datetime(meta_train["match_date"])
+    if train_dates.max() >= val_df["match_date"].min():
+        raise ValueError("Training dates must strictly precede validation dates")
+    if "match_id" in meta_train and set(meta_train.match_id) & set(val_df.match_id):
+        raise ValueError("Train and validation contain overlapping matches")
+
     # Split validation set: H1 for early stopping, H2 for calibration
     # This prevents the calibrator from seeing the same data used for GBDT training
     # Split at the midpoint between the min and max dates
@@ -83,6 +90,8 @@ def main():
     mask_es = val_df["match_date"] < val_cutoff_mid
     mask_cal = val_df["match_date"] >= val_cutoff_mid
 
+    if set(val_df.loc[mask_es, "match_id"]) & set(val_df.loc[mask_cal, "match_id"]):
+        raise ValueError("Early stopping and calibration require distinct matches")
     X_val_es = val_df[mask_es][FEATURE_COLUMNS].values.astype(np.float32)
     y_val_es = val_df[mask_es]["server_won"].values.astype(np.float32)
     val_df_cal = val_df[mask_cal].copy()
@@ -128,21 +137,31 @@ def main():
             print(f"  {name:40s} {score:.1f}")
 
     print("\n=== Calibrating on validation set (H2) ===")
-    match_format = MatchFormat.best_of_3_tiebreak()
-    raw_probs, outcomes = build_match_win_probs_on_val(model, val_df_cal, match_format)
-    if not len(outcomes):
-        raise ValueError("Calibration requires matches with recorded winners.")
-    print(f"  Matches with a recorded winner: {len(outcomes)}")
+    snapshots = checkpoint_predictions(model, val_df_cal)
+    print(f"  {len(snapshots):,} snapshots, {snapshots.match_id.nunique()} calibration matches")
     calibrator = MatchWinCalibrator()
-    calibrator.fit(raw_probs, outcomes)
-    print(f"  Pre-calibration ECE: {calibrator.expected_calibration_error(raw_probs, outcomes):.4f}")
-    print(f"  Post-calibration ECE (fitting sample): {calibrator.expected_calibration_error(calibrator.calibrate_batch(raw_probs), outcomes):.4f}")
+    calibrator.fit_inplay(snapshots.raw, snapshots.outcome, snapshots.weight)
+    if "player_id_source" in val_df:
+        sources = val_df.player_id_source.unique()
+        if len(sources) != 1:
+            raise ValueError("Mixed player ID namespaces")
+        calibrator.player_id_source = sources[0]
+    print(f"  In-play calibration slope: {calibrator.slope:.4f}")
 
     print("\n=== Saving artifacts ===")
     model_path = os.path.join(args.artifacts_dir, "gbdt_model.pkl")
     cal_path = os.path.join(args.artifacts_dir, "calibrator.pkl")
     model.save(model_path)
     calibrator.save(cal_path)
+    metadata = {
+        "train_points": len(y_train), "train_matches": meta_train.match_id.nunique(),
+        "train_through": str(train_dates.max().date()),
+        "validation_start": str(val_dates.min())[:10], "calibration_from": str(val_cutoff_mid)[:10],
+        "calibration_through": str(val_df_cal.match_date.max().date()),
+        "calibration_snapshots": len(snapshots), "calibration_matches": snapshots.match_id.nunique(),
+        "stride": 10, "calibration_slope": calibrator.slope, "player_id_source": calibrator.player_id_source,
+    }
+    (Path(args.artifacts_dir)/"fit_metadata.json").write_text(json.dumps(metadata, indent=2))
     print(f"  Model saved:      {model_path}")
     print(f"  Calibrator saved: {cal_path}")
     print("\nDone. Next step: python scripts/backtest.py")

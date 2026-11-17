@@ -44,7 +44,7 @@ class EloTracker:
 
     def __init__(self):
         # ratings[surface][player_id] = current ELO
-        self.ratings: Dict[str, Dict[str, float]] = {s: defaultdict(lambda: INITIAL_RATING) for s in SURFACES}
+        self.ratings: Dict[str, Dict[str, float]] = {s: defaultdict(lambda: INITIAL_RATING) for s in (*SURFACES, "Overall")}
         # Store a snapshot per (tourney_date, player_id, surface) for look-up
         # at any historical date.  Key: (surface, player_id) → list of (date_str, rating)
         self._history: Dict[tuple, list] = defaultdict(list)
@@ -69,8 +69,6 @@ class EloTracker:
 
         for _, row in df.iterrows():
             surface = str(row.get("surface", "Hard"))
-            if surface not in SURFACES:
-                continue
 
             w_id = str(row["winner_id"])
             l_id = str(row["loser_id"])
@@ -78,7 +76,9 @@ class EloTracker:
             date = str(row["tourney_date"])
 
             k = K_FACTOR.get(level, DEFAULT_K)
-            self._update_elo(w_id, l_id, surface, k, date)
+            self._update_elo(w_id, l_id, "Overall", k, date)
+            if surface in SURFACES:
+                self._update_elo(w_id, l_id, surface, k, date)
 
     def _update_elo(
         self, winner_id: str, loser_id: str, surface: str, k: float, date: str
@@ -120,18 +120,16 @@ class EloTracker:
         Returns:
             ELO rating (float). Returns INITIAL_RATING for unknown players.
         """
-        if surface not in SURFACES:
-            return INITIAL_RATING
-
         player_id = str(player_id)
-
+        if surface not in SURFACES:
+            surface = "Overall"
         if as_of_date is None:
-            return self.ratings[surface].get(player_id, INITIAL_RATING)
+            return self.ratings[surface].get(player_id, self.ratings["Overall"].get(player_id, INITIAL_RATING))
 
-        # Normalise date to 8-digit YYYYMMDD string
         as_of = as_of_date.replace("-", "")
-
         history = self._history.get((surface, player_id))
+        if not history or history[0][0] > as_of:
+            history = self._history.get(("Overall", player_id))
         if not history:
             return INITIAL_RATING
 

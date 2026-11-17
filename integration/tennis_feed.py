@@ -49,6 +49,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from tennis.fixture_history import MAJOR_SURFACES
+from tennis.live_score import observed_points
+
 log = logging.getLogger(__name__)
 
 _SCORE_MAP = {"0": 0, "15": 1, "30": 2, "40": 3, "A": 4, "AD": 4}
@@ -76,6 +79,12 @@ class PointEvent:
     is_tiebreak: bool
     server_won_last_point: Optional[bool]  # None on first event of match
     point_sequence: int
+    point_server: int | None = None
+    player1_key: str = ""
+    player2_key: str = ""
+    actionable: bool = True
+    reset: bool = False
+    best_of: int | None = None
 
 
 def _parse_score_field(score_str: str) -> tuple[int, int]:
@@ -157,6 +166,7 @@ class TennisFeed:
         self._rest_poll_secs = rest_poll_secs
         # match_id → total points already emitted (global sequence counter)
         self._points_seen: dict[str, int] = {}
+        self._prefix = {}
         self._running = False
 
     async def run(self) -> None:
@@ -246,11 +256,20 @@ class TennisFeed:
             # Surface and level
             event_type = str(match.get("event_type_type", ""))
             # Only process men's singles for now (model trained on ATP)
-            if "men" not in event_type.lower():
+            category = event_type.lower()
+            if "singles" not in category or ("atp" not in category and "men" not in category.split()) or "women" in category:
                 return
 
             surface = _normalize_surface(str(match.get("event_ground", "Hard")))
             tour_level = _normalize_tournament_level(event_type)
+            name = str(match.get("tournament_name","")).lower()
+            best_of = 3
+            if name in MAJOR_SURFACES:
+                surface = MAJOR_SURFACES[name]
+                tour_level = "G"
+                best_of = 3 if str(match.get("event_qualification")).lower() in ("1","true") else 5
+            elif not match.get("event_ground"):
+                surface = "Unknown"
             match_date = str(match.get("event_date", ""))[:10]
 
             # Server: "First Player" or "Second Player"
@@ -263,21 +282,44 @@ class TennisFeed:
             # Current game score
             game_score_str = str(match.get("event_game_result", "0 - 0"))
             pts = _parse_score_field(game_score_str)
-            pt_p1 = pts[0] if pts[0] >= 0 else 0
-            pt_p2 = pts[1] if pts[1] >= 0 else 0
+            pt_p1, pt_p2 = pts
 
             is_tiebreak = games_p1 == 6 and games_p2 == 6
 
+            if is_tiebreak:
+                try:
+                    pt_p1, pt_p2 = (int(x.strip()) for x in game_score_str.split("-"))
+                except ValueError:
+                    pt_p1 = pt_p2 = -1
             # Process point-by-point data
             pbp_list = match.get("pointbypoint") or []
             if pbp_list:
-                await self._process_pbp(
-                    match_id, p1, p2, surface, tour_level, match_date,
-                    sets_p1, sets_p2, is_tiebreak, pbp_list,
-                )
+                prefix = observed_points(pbp_list, best_of)
+                old = self._prefix.get(match_id, ())
+                if len(prefix) < len(old) or prefix == old:
+                    return
+                changed = bool(old and prefix[:len(old)] != old)
+                first = 0 if changed else len(old)
+                for i in range(first, len(prefix)):
+                    point = prefix[i]
+                    # Warm up the posterior on backlog. A trade requires a
+                    # fresh update that agrees with the current scoreboard.
+                    current = (bool(old) and not changed and i == len(prefix)-1
+                               and point.sets == (sets_p1, sets_p2) and point.games == (games_p1, games_p2)
+                               and point.points == (pt_p1,pt_p2) and point.next_server == server
+                               and serve_str in ("First Player","Second Player"))
+                    await self._on_point(PointEvent(
+                        match_id,p1,p2,surface,tour_level,match_date,*point.sets,*point.games,*point.points,
+                        point.next_server, point.tiebreak,point.won,i+1,point_server=point.served_by,
+                        player1_key=str(match.get("first_player_key") or ""),
+                        player2_key=str(match.get("second_player_key") or ""),
+                        actionable=current,reset=changed and i==0,best_of=best_of))
+                self._prefix[match_id] = prefix
             else:
                 # No PBP — emit a single event from top-level score
                 # Use game score as dedup key
+                if min(pt_p1, pt_p2) < 0:
+                    return
                 dedup_key = f"{sets_p1}{sets_p2}{games_p1}{games_p2}{game_score_str}"
                 prev_seen = self._points_seen.get(match_id, 0)
                 seq = hash(dedup_key) & 0x7FFFFFFF
@@ -295,92 +337,14 @@ class TennisFeed:
                     points_p1=pt_p1, points_p2=pt_p2,
                     server=server, is_tiebreak=is_tiebreak,
                     server_won_last_point=None,
-                    point_sequence=seq,
+                    point_sequence=seq, actionable=False, best_of=best_of,
+                    player1_key=str(match.get("first_player_key") or ""),
+                    player2_key=str(match.get("second_player_key") or ""),
                 )
                 await self._on_point(event)
 
         except Exception as e:
             log.debug("Error in _process_match: %s", e)
-
-    async def _process_pbp(
-        self,
-        match_id: str, p1: str, p2: str,
-        surface: str, tour_level: str, match_date: str,
-        sets_p1: int, sets_p2: int,
-        is_tiebreak: bool, pbp_list: list,
-    ) -> None:
-        """Emit events from the nested point-by-point structure.
-
-        pbp_list is a list of game objects:
-          {
-            "set_number": "Set 1",
-            "number_game": "1",
-            "player_served": "First Player",
-            "score": "1 - 0",               # game score after this game
-            "points": [
-              {"number_point": "1", "score": "15 - 0", ...},
-            ]
-          }
-        """
-        # Flatten all points into a global sequence
-        all_points: list[tuple[int, int, int, dict, bool]] = []  # (set_idx, game_idx, pt_idx, pt, server_is_first)
-        for game in pbp_list:
-            set_num = self._parse_set_number(str(game.get("set_number", "Set 1")))
-            game_num = int(game.get("number_game", 0))
-            server_is_first = str(game.get("player_served", "")) == "First Player"
-            points = game.get("points") or []
-            for pt in points:
-                pt_num = int(pt.get("number_point", 0))
-                all_points.append((set_num, game_num, pt_num, pt, server_is_first))
-
-        # How many points have we already emitted for this match?
-        prev_count = self._points_seen.get(match_id, 0)
-        if len(all_points) <= prev_count:
-            return  # no new points
-
-        # Emit only new points
-        new_points = all_points[prev_count:]
-        global_seq = prev_count
-
-        prev_score_str: Optional[str] = None
-
-        for _, game_idx, _, pt, server_is_first in new_points:
-            global_seq += 1
-            score_str = str(pt.get("score", "0 - 0"))
-            server_won = _server_won_from_scores(prev_score_str, score_str, server_is_first)
-            prev_score_str = score_str
-
-            pts = _parse_score_field(score_str)
-            pt_p1 = pts[0] if pts[0] >= 0 else 0
-            pt_p2 = pts[1] if pts[1] >= 0 else 0
-
-            server = 0 if server_is_first else 1
-
-            # Approximate games from the game index within this set
-            # (exact values come from the last game's "score" field, but for
-            # point-level events the per-point game count is approximate)
-
-            event = PointEvent(
-                match_id=match_id,
-                player1_name=p1, player2_name=p2,
-                surface=surface, tournament_level=tour_level,
-                match_date=match_date,
-                sets_p1=sets_p1, sets_p2=sets_p2,
-                games_p1=game_idx, games_p2=0,  # will be refined below
-                points_p1=pt_p1, points_p2=pt_p2,
-                server=server, is_tiebreak=is_tiebreak,
-                server_won_last_point=server_won,
-                point_sequence=global_seq,
-            )
-            await self._on_point(event)
-
-        self._points_seen[match_id] = global_seq
-
-    @staticmethod
-    def _parse_set_number(set_str: str) -> int:
-        """Parse 'Set 1' -> 1."""
-        m = re.search(r"\d+", set_str)
-        return int(m.group()) if m else 1
 
     @staticmethod
     def _parse_scores_array(match: dict) -> tuple[int, int, int, int]:
@@ -395,7 +359,10 @@ class TennisFeed:
 
         Returns: (sets_p1, sets_p2, games_p1_current_set, games_p2_current_set)
         """
-        scores = match.get("scores") or []
+        scores = sorted(match.get("scores") or [], key=lambda s:int(s.get("score_set",0)))
+        active_set = re.fullmatch(r"Set (\d+)", str(match.get("event_status","")), flags=re.I)
+        if active_set:
+            scores = [s for s in scores if int(s.get("score_set",0)) <= int(active_set[1])]
         if not scores:
             # Fallback to event_final_result
             final = str(match.get("event_final_result", "0 - 0"))

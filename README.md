@@ -93,7 +93,7 @@ place an order.
 
 | Rule | What it does | Real orders with `--live` |
 | --- | --- | --- |
-| Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | Qualifying rounds on WTA and ATP Challenger only |
+| Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | First-round qualifying on WTA and ATP Challenger only |
 | Tennis dip variants | The same with the bid 10¢ below the pre-match price, and at 65¢ | No |
 | Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
 | NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |

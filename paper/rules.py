@@ -21,8 +21,14 @@ NBA_BAND, NBA_MIN_LEAD = (97, 99), 6
 
 
 def qualifying(market):
-    """True for a tennis qualifying-round match, read from the market's rules text."""
-    return bool(re.search(r"\bQualif", market.get("rules_primary") or ""))
+    """"first" for a first-round tennis qualifying match, "later" for later qualifying rounds, else None.
+
+    Read from the market's rules text ("... Qualification Round 1 ...", "... Qualification Final ...").
+    """
+    found = re.search(r"\bQualif\w*( Final| Round (\d+))?", market.get("rules_primary") or "")
+    if not found:
+        return None
+    return "first" if found.group(1) is None or found.group(2) == "1" else "later"
 
 
 def top(book):

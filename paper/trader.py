@@ -9,15 +9,16 @@ few markets with an order) the order book and the trade record.
                    The bid rests on the underdog's market (as NO) when there is one.
   tennis dip rel   the same, with the bid 10c below the pre-match price
   tennis dip deep  the same, with the bid at 65c
-  tennis prematch  qualifying-round favourite at 90c+: buy at the ask before play
+  tennis prematch  first-round qualifying favourite at 90c+: buy at the ask before play
   nba take         4th quarter or overtime, leader ahead by 6+ with its ask at
                    97-99c: buy at the ask, limited to the size displayed there
   nba rest         the same signal, a bid 1c below the ask instead
   cbb dip (...)    men's college basketball, the same three dip bids as tennis
 
-Tiers. "validated" rows are the ones the research supports: qualifying-round
-matches on WTA and ATP Challenger, men's college basketball, and NBA leads of
-6+. "main-draw" is the rest of those two tennis tours. "shadow" is everything
+Tiers. "validated" rows are the ones the research supports: first-round
+qualifying matches on WTA and ATP Challenger, men's college basketball, and
+NBA leads of 6+. "later-qualifying" and "main-draw" are the rest of those two
+tennis tours. "shadow" is everything
 the research did not support or did not test: ATP main tour, WTA Challenger,
 NBA leads under 6.
 
@@ -257,11 +258,12 @@ class Trader:
                 self.log("skip", event=event, why="price already at the bid", ask=book["ask"])
                 continue
             prefix, tier = DIPS[series]
-            early = prefix == "tennis" and rules.qualifying(m)
-            if prefix == "tennis" and tier == "validated" and not early:
-                tier = "main-draw"                     # real orders are for qualifying rounds, where the evidence is
+            stage = rules.qualifying(m) if prefix == "tennis" else None
+            if prefix == "tennis" and tier == "validated" and stage != "first":
+                # Real orders are for first-round qualifying, the only round where the favourite gap holds up.
+                tier = "later-qualifying" if stage else "main-draw"
             common = dict(tier=tier, kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
-                          ask_when_placed=book["ask"], round="qualifying" if early else "main draw")
+                          ask_when_placed=book["ask"], round=f"qualifying, {stage} round" if stage else "main draw")
             self.send(self.order(now, rule=f"{prefix}_dip", price=rules.DIP_BID, **common))
             near = math.floor(start)-rules.DIP_RELATIVE     # simulated only: a bid set relative to the pre-match price
             if near != rules.DIP_BID and book["ask"] > near:
@@ -271,7 +273,7 @@ class Trader:
     def prematch(self, event, m, now):
         """Simulated only: buy a qualifying-round tennis favourite at 90c+ before play, on the cheaper book."""
         series, key = m["ticker"].split("-")[0], event+":pre"
-        if DIPS[series][0] != "tennis" or key in self.handled or not rules.qualifying(m):
+        if DIPS[series][0] != "tennis" or key in self.handled or rules.qualifying(m) != "first":
             return
         pick = rules.favourite(self.state["watch"][event])
         if not pick:

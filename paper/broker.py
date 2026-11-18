@@ -58,5 +58,9 @@ class Broker:
                     cost=money("taker_fill_cost_dollars", "maker_fill_cost_dollars"),
                     fees=money("taker_fees_dollars", "maker_fees_dollars"))
 
+    def queue(self, order_id):
+        """Contracts resting ahead of this order at its price."""
+        return float(self.call("GET", f"/portfolio/orders/{order_id}/queue_position")["queue_position_fp"])
+
     def cancel(self, order_id, ticker):
         return self.call("DELETE", f"/portfolio/events/orders/{order_id}", params=dict(market_ticker=ticker))

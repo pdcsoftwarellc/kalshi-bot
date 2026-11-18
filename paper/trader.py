@@ -9,6 +9,7 @@ few markets with an order) the order book and the trade record.
                    The bid rests on the underdog's market (as NO) when there is one.
   tennis dip rel   the same, with the bid 10c below the pre-match price
   tennis dip deep  the same, with the bid at 65c
+  tennis dip 85    first-round qualifying only: the bid at 85c
   tennis prematch  first-round qualifying favourite at 90c+: buy at the ask before play
   nba take         4th quarter or overtime, leader ahead by 6+ with its ask at
                    97-99c: buy at the ask, limited to the size displayed there
@@ -16,11 +17,11 @@ few markets with an order) the order book and the trade record.
   cbb dip (...)    men's college basketball, the same three dip bids as tennis
 
 Tiers. "validated" rows are the ones the research supports: first-round
-qualifying matches on WTA and ATP Challenger, men's college basketball, and
-NBA leads of 6+. "later-qualifying" and "main-draw" are the rest of those two
-tennis tours. "shadow" is everything
-the research did not support or did not test: ATP main tour, WTA Challenger,
-NBA leads under 6.
+qualifying matches on every tennis tour, men's college basketball, and NBA
+leads of 6+. "later-qualifying" and "main-draw" are the other rounds on WTA
+and ATP Challenger. "shadow" is everything the research did not support or
+did not test: other rounds on ATP main tour and WTA Challenger, NBA leads
+under 6.
 
 With `--live`, a validated row of a rule named in --live-rules (default: the
 80c dip bid in tennis and college basketball) is also sent to the production
@@ -32,7 +33,7 @@ or while a file named STOP exists in the state folder.
 State is saved after every pass, so a restart resumes where it stopped.
 
   .venv/bin/python -m paper.trader run --hours 24
-  .venv/bin/python -m paper.trader run --hours 336 --live --contracts 5
+  .venv/bin/python -m paper.trader run --hours 336 --live --contracts 3
   .venv/bin/python -m paper.trader report
 """
 import argparse
@@ -217,6 +218,12 @@ class Trader:
         if seen["filled"] > live["filled"]:
             self.log("live_fill", id=o["id"], event=o["event"], filled=seen["filled"], cost=seen["cost"])
         live.update(filled=seen["filled"], cost=seen["cost"], fees=seen["fees"], exchange_status=seen["status"])
+        if seen["status"] == "resting" and seen["filled"] < live["count"]:
+            try:                                       # how many contracts sit ahead of us: the simulation cannot know this
+                live["queue"] = self.broker.queue(live["order_id"])
+                live.setdefault("queue_first", live["queue"])
+            except (BrokerError, httpx.HTTPError, KeyError, ValueError):
+                pass
         return True
 
     # ---- rules -------------------------------------------------------------------------------
@@ -259,8 +266,9 @@ class Trader:
                 continue
             prefix, tier = DIPS[series]
             stage = rules.qualifying(m) if prefix == "tennis" else None
-            if prefix == "tennis" and tier == "validated" and stage != "first":
-                # Real orders are for first-round qualifying, the only round where the favourite gap holds up.
+            if stage == "first":
+                tier = "validated"                     # first-round qualifying is supported on every tour
+            elif prefix == "tennis" and tier == "validated":
                 tier = "later-qualifying" if stage else "main-draw"
             common = dict(tier=tier, kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
                           ask_when_placed=book["ask"], round=f"qualifying, {stage} round" if stage else "main draw")
@@ -269,6 +277,8 @@ class Trader:
             if near != rules.DIP_BID and book["ask"] > near:
                 self.order(now, rule=f"{prefix}_dip_rel", price=near, **common)
             self.order(now, rule=f"{prefix}_dip_deep", price=rules.DIP_DEEP, **common)   # simulated only: a second, deeper bid
+            if stage == "first" and book["ask"] > rules.DIP_HIGH:
+                self.order(now, rule="tennis_dip_85", price=rules.DIP_HIGH, **common)   # simulated only: fills more often
 
     def prematch(self, event, m, now):
         """Simulated only: buy a qualifying-round tennis favourite at 90c+ before play, on the cheaper book."""
@@ -288,7 +298,7 @@ class Trader:
         if not books:
             return
         book, ticker, side = min(books, key=lambda b: b[0]["ask"])
-        o = self.order(now, rule="tennis_prematch", tier=DIPS[series][1], kind="take", event=event, ticker=ticker,
+        o = self.order(now, rule="tennis_prematch", tier="validated", kind="take", event=event, ticker=ticker,
                        side=side, price=book["ask"], start=pick[1], round="qualifying")
         o.update(status="filled", filled_at=now, size=book["ask_size"])
 
@@ -449,6 +459,24 @@ def summary(orders):
     return out
 
 
+def gaps(orders):
+    """Weekly pre-game gap of every 90c+ favourite the trader priced: settlement value minus pre-game price.
+
+    The dip rules only work while this stays positive, and it shows up long before the fills can.
+    """
+    weeks = defaultdict(list)
+    for o in orders:
+        if o["rule"] not in ("tennis_dip", "cbb_dip") or "payout" not in o:
+            continue
+        group = ("college basketball" if o["rule"] == "cbb_dip" else
+                 "tennis, first-round qualifying" if str(o.get("round", "")).startswith("qualifying, first") else "tennis, other rounds")
+        week = datetime.fromtimestamp(o["placed"], timezone.utc).strftime("%G-W%V")
+        for key in ((group, week), (group, "all weeks")):
+            weeks[key].append((o["start"], o["payout"]))
+    return {key: dict(favourites=len(rows), price=mean(s for s, _ in rows), won=mean(p for _, p in rows),
+                      gap_cents=mean(100*p-s for s, p in rows)) for key, rows in sorted(weeks.items())}
+
+
 def report(out=OUT):
     file = Path(out)/"state.json"
     if not file.exists():
@@ -471,6 +499,15 @@ def report(out=OUT):
             print(f'  LIVE: {l["orders"]} real orders, {l["with_fills"]} with fills ({l["contracts_filled"]:.0f} contracts), '
                   f'{l["settled"]} settled: paid ${l["paid"]:.2f}, fees ${l["fees"]:.2f}, profit ${l["pnl"]:+.2f}; '
                   f'simulated fill agreed with the exchange on {l["simulated_fill_agrees"]} of {l["orders"]}')
+    weekly = gaps(state["orders"])
+    if weekly:
+        print("\nPre-game gap of 90c+ favourites (history: about +3.5c first-round qualifying, +2.5c college basketball, +1c other)")
+        for (group, week), g in weekly.items():
+            print(f'  {group:31} {week:9} favourites {g["favourites"]:4}  price {g["price"]:.1f}c  won {g["won"]:.1%}  gap {g["gap_cents"]:+.1f}c')
+    queued = [o["live"] for o in state["orders"] if "queue_first" in (o.get("live") or {})]
+    if queued:
+        print(f'\nReal resting bids: median {median(l["queue_first"] for l in queued):.0f} contracts ahead in the queue when first read '
+              f'({len(queued)} orders)')
     return table
 
 
@@ -481,7 +518,7 @@ def main():
     parser.add_argument("--every", type=int, default=20, help="seconds between passes")
     parser.add_argument("--dir", default=str(OUT), help="where state and the journal are kept")
     parser.add_argument("--live", action="store_true", help="also place real orders on the production account")
-    parser.add_argument("--contracts", type=int, default=5, help="contracts per live order")
+    parser.add_argument("--contracts", type=int, default=3, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
     parser.add_argument("--live-rules", nargs="+", choices=("tennis_dip", "cbb_dip", "nba_take"),

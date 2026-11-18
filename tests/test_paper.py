@@ -171,6 +171,9 @@ class FakeBroker:
         self.fills[order_id] = 0 if rest else count
         return dict(order_id=order_id, fill_count=str(self.fills[order_id]))
 
+    def queue(self, order_id):
+        return 40.0
+
     def order(self, order_id):
         filled = self.fills[order_id]
         return dict(status="executed", filled=filled, remaining=0, cost=filled*.98, fees=.01 if filled else 0)
@@ -285,6 +288,18 @@ def test_only_qualifying_tennis_matches_send_real_orders(tmp_path):
     dip = trader.state["orders"][1]
     assert (dip["rule"], dip["tier"], dip["round"]) == ("tennis_dip", "validated", "qualifying, first round")
     assert broker.sent == [(dog, "no", 80, 5, True)]             # only the 80c bid is real
+    assert [o["rule"] for o in trader.state["orders"]][1:] == ["tennis_dip", "tennis_dip_rel", "tennis_dip_deep", "tennis_dip_85"]
+    api.listing[dog] = dict(market(dog, 17, 19), rules_primary=text)      # near the bid: the exchange is read each pass
+    broker.order = lambda order_id: dict(status="resting", filled=0, remaining=5, cost=0, fees=0)
+    trader.step(T0+280)
+    assert dip["live"]["queue_first"] == 40
+    del broker.order
+
+    api.listing.clear()
+    api.settled[dog] = dict(status="finalized", settlement_value_dollars="0.0000", settlement_ts=iso(T0+900))
+    trader.step(T0+1000)
+    from paper.trader import gaps
+    assert gaps(trader.state["orders"])[("tennis, first-round qualifying", "all weeks")]["gap_cents"] == 7.0
 
 
 def test_nba_stays_simulated_unless_named_as_a_live_rule(tmp_path):
@@ -304,3 +319,18 @@ def test_only_first_round_qualifying_counts():
     assert stage("Qualification Round 1") == "first" and stage("Qualifiers Round") == "first"
     assert stage("Qualification Round 2") == "later" and stage("Qualification Final") == "later"
     assert stage("Round Of 16") is None and rules.qualifying({}) is None
+
+
+def test_first_round_qualifying_is_real_on_a_shadow_tour(tmp_path):
+    event, ticker = "KXATPMATCH-26NOV18AAABBB", "KXATPMATCH-26NOV18AAABBB-AAA"
+    api, broker = FakeApi(), FakeBroker()
+    text = "... in the 2026 ATP Paris Qualification Round 1 after a ball ..."
+    api.listing[ticker] = dict(market(ticker, 92, 94), rules_primary=text)
+    api.books[ticker] = book(92, 94)
+    api.states[event] = dict(status="not_started")
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="live")
+    trader.step(T0+260)
+    assert broker.sent == [(ticker, "yes", 80, 5, True)]

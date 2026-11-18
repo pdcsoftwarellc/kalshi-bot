@@ -93,8 +93,8 @@ place an order.
 
 | Rule | What it does | Real orders with `--live` |
 | --- | --- | --- |
-| Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | First-round qualifying on WTA and ATP Challenger only |
-| Tennis dip variants | The same with the bid 10¢ below the pre-match price, and at 65¢ | No |
+| Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | First-round qualifying only, on every tour |
+| Tennis dip variants | The same with the bid 10¢ below the pre-match price, at 65¢, and at 85¢ in first-round qualifying | No |
 | Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
 | NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |
 | College basketball dip | The three tennis dip bids on men's college games | The 80¢ bid only |
@@ -109,7 +109,7 @@ already on the exchange stay there until the match ends or they are cancelled by
 
 ```sh
 .venv/bin/python -m paper.trader run --hours 24    # simulated; one pass every 20 seconds
-.venv/bin/python -m paper.trader run --hours 336 --live --contracts 5 --max-exposure 60 --max-loss 30
+.venv/bin/python -m paper.trader run --hours 336 --live --contracts 3 --max-exposure 60 --max-loss 30
 .venv/bin/python -m paper.trader report
 ```
 
@@ -118,6 +118,8 @@ already on the exchange stay there until the match ends or they are cancelled by
 - State and a journal are kept in `data/paper/`, so a restart resumes. A match that starts
   while the trader is not running is skipped, because its pre-match price was not observed.
 - Run only one copy against a state folder.
+- `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
+  mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both
   markets' quotes, from 45 minutes before each start, for later score-aware analysis.
 

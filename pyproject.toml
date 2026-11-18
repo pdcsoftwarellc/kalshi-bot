@@ -23,7 +23,7 @@ dev = ["pytest>=7.4", "pytest-cov"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["tennis*", "integration*", "web*"]
+include = ["tennis*", "integration*", "web*", "paper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

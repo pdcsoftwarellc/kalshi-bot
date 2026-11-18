@@ -1,0 +1,157 @@
+from datetime import datetime, timezone
+
+import pytest
+
+from paper import rules
+from paper.trader import Trader, summary
+
+T0 = 1_800_000_000.0
+
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def trade(ts, yes, count=10):
+    return dict(created_time=iso(ts), yes_price_dollars=f"{yes/100:.4f}", no_price_dollars=f"{1-yes/100:.4f}", count_fp=str(count))
+
+
+def book(yes_bid, yes_ask, size=500):
+    return dict(orderbook_fp=dict(yes_dollars=[["0.0100", "9"], [f"{yes_bid/100:.4f}", str(size)]],
+                                  no_dollars=[[f"{1-yes_ask/100:.4f}", str(size)]]))
+
+
+def test_top_of_book_for_both_sides():
+    top = rules.top(book(96, 98, 250))
+    assert top["yes"] == dict(bid=96, bid_size=250, ask=98, ask_size=250)
+    assert top["no"] == dict(bid=2, bid_size=250, ask=4, ask_size=250)
+    assert rules.top({})["yes"]["ask"] is None
+
+
+def test_favourite_needs_a_stable_price_at_ninety():
+    steady = [(T0+20*i, 8.0) for i in range(12)]
+    assert rules.favourite(steady) == ("no", 92.0)
+    assert rules.favourite(steady[:5]) is None                                  # too few quotes
+    assert rules.favourite([(t, 85.0) for t, _ in steady]) is None              # favourite below 90c
+    assert rules.favourite([(t, 91.0+(i % 2)*5) for i, (t, _) in enumerate(steady)]) is None    # price moving
+
+
+def test_resting_bid_fills_only_on_a_print_below_it():
+    found = rules.prints([trade(T0+5, 80, 7), trade(T0+9, 79, 3), trade(T0-5, 60)], "yes", 80, T0)
+    assert (found["touched_at"], found["filled_at"], found["size_through"], found["size_at"]) == (T0+5, T0+9, 3, 7)
+    assert rules.prints([trade(T0+5, 81)], "yes", 80, T0)["filled_at"] is None
+    assert rules.prints([trade(T0+5, 25)], "no", 80, T0)["filled_at"] == T0+5   # yes 25c is no 75c
+
+
+def test_nba_leader():
+    state = dict(status="inprogress", period=4, home_points=100, away_points=90)
+    assert rules.nba_leader("KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA", state) == "no"
+    assert rules.nba_leader("KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-LAL", state) == "yes"
+    assert rules.nba_leader("KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA", dict(state, period=3)) is None
+    assert rules.nba_leader("KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA", dict(state, away_points=100)) is None
+
+
+def test_net_per_contract():
+    assert rules.net(80, 1, taker=False) == 20
+    assert rules.net(98, 1, taker=True) == pytest.approx(2-.1372)
+    assert rules.net(98, 0, taker=True) == pytest.approx(-98.1372)
+
+
+class FakeApi:
+    """Canned responses keyed by path; tests mutate the attributes between passes."""
+
+    def __init__(self):
+        self.listing, self.states, self.books, self.tape, self.settled = {}, {}, {}, {}, {}
+
+    def get(self, path, **params):
+        if path == "/milestones":
+            return dict(milestones=[dict(id=f"id-{e}", primary_event_tickers=[e]) for e in self.states])
+        if path == "/markets":
+            return dict(markets=[m for m in self.listing.values() if m["ticker"].startswith(params["series_ticker"]+"-")])
+        if path == "/live_data/batch":
+            return dict(live_datas=[dict(milestone_id=i, details=self.states[i[3:]]) for i in params["milestone_ids"]])
+        if path == "/markets/trades":
+            return dict(trades=self.tape.get(params["ticker"], []))
+        if path.endswith("/orderbook"):
+            return self.books[path.split("/")[2]]
+        return dict(market=self.settled.get(path.split("/")[2], {}))
+
+
+def market(ticker, bid, ask):
+    return dict(ticker=ticker, event_ticker=ticker.rsplit("-", 1)[0], yes_bid_dollars=f"{bid/100:.4f}", yes_ask_dollars=f"{ask/100:.4f}")
+
+
+def test_tennis_dip_from_pre_match_to_settlement(tmp_path):
+    event, ticker = "KXWTAMATCH-26NOV18AAABBB", "KXWTAMATCH-26NOV18AAABBB-AAA"
+    api = FakeApi()
+    api.listing[ticker] = market(ticker, 92, 94)
+    api.states[event] = dict(status="not_started")
+    trader = Trader(api, tmp_path)
+    for i in range(12):
+        trader.step(T0+20*i)
+    assert not trader.state["orders"]
+
+    api.states[event] = dict(status="live")
+    api.books[ticker] = book(91, 93)
+    start = T0+260
+    trader.step(start)
+    (order,) = trader.state["orders"]
+    assert (order["rule"], order["tier"], order["side"], order["price"], order["start"], order["status"]) == \
+        ("tennis_dip", "validated", "yes", 80, 93.0, "open")
+
+    api.listing[ticker] = market(ticker, 82, 84)                 # near the bid: the tape is read every pass
+    api.tape[ticker] = [trade(start+30, 80, 40)]
+    trader.step(start+40)
+    assert order["status"] == "open" and order["touched_at"] == start+30
+
+    api.tape[ticker].append(trade(start+50, 78, 25))
+    trader.step(start+60)
+    assert order["status"] == "filled" and order["size_through"] == 25
+
+    del api.listing[ticker]
+    api.settled[ticker] = dict(status="finalized", settlement_value_dollars="1.0000", settlement_ts=iso(start+900))
+    trader.step(start+1000)
+    assert (order["status"], order["payout"], order["net"], order["size"]) == ("settled", 1.0, 20, 25)
+
+    # A restart reads the same state and does not place a second order for the match.
+    again = Trader(api, tmp_path)
+    again.step(start+1100)
+    assert len(again.state["orders"]) == 1
+    row = summary(again.state["orders"])["tennis_dip (validated)"]
+    assert (row["fills"], row["win_rate"], row["net_cents"], row["dollars_at_clip"]) == (1, 1.0, 20, 5.0)
+
+
+def test_tennis_match_already_live_is_skipped(tmp_path):
+    event, ticker = "KXWTAMATCH-26NOV18AAABBB", "KXWTAMATCH-26NOV18AAABBB-AAA"
+    api = FakeApi()
+    api.listing[ticker] = market(ticker, 92, 94)
+    api.states[event] = dict(status="live")
+    trader = Trader(api, tmp_path)
+    trader.step(T0)
+    assert not trader.state["orders"] and event in trader.handled
+
+
+def test_nba_take_and_rest(tmp_path):
+    event, ticker = "KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA"
+    api = FakeApi()
+    api.listing[ticker] = market(ticker, 2, 3)                   # Charlotte (away) trails: the leader is the NO side
+    api.states[event] = dict(status="inprogress", period=3, home_points=90, away_points=70, period_remaining_time="1:00")
+    api.books[ticker] = book(2, 3, 800)
+    trader = Trader(api, tmp_path)
+    trader.step(T0)
+    assert not trader.state["orders"]                            # third quarter
+
+    api.states[event]["period"] = 4
+    trader.step(T0+20)
+    take, rest = trader.state["orders"]
+    assert (take["rule"], take["side"], take["price"], take["status"], take["size"]) == ("nba_take", "no", 98, "filled", 800)
+    assert (rest["rule"], rest["price"], rest["status"]) == ("nba_rest", 97, "open")
+
+    trader.step(T0+40)
+    assert len(trader.state["orders"]) == 2                      # one entry per game
+
+    del api.listing[ticker]
+    api.settled[ticker] = dict(status="finalized", settlement_value_dollars="0.0000", settlement_ts=iso(T0+600))
+    trader.step(T0+700)
+    assert (take["status"], take["payout"]) == ("settled", 1.0) and take["net"] == pytest.approx(2-.1372)
+    assert rest["status"] == "expired" and "net" not in rest

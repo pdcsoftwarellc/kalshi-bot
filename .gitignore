@@ -1,6 +1,7 @@
 data/raw/
 data/processed/
 data/artifacts/
+data/paper/
 __pycache__/
 *.py[cod]
 *.egg-info/

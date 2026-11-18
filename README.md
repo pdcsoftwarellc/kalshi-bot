@@ -84,6 +84,25 @@ By default (`python bot.py`) the bot simulates fills in `TradingBot._execute_sig
 - Paper fills assume execution at the listed price; they do not model queue priority,
   available liquidity, slippage, or settlement. They are not evidence of realized profit.
 
+### Rule-based paper trader
+
+`paper/` simulates the two rules that survived the [fourth research round](research/parallel-round4.md):
+an 80¢ resting bid on tennis favourites priced 90¢ or more before play, and buying the NBA
+leader at 97–99¢ in the fourth quarter or overtime (at the ask, and with a bid 1¢ below it).
+It uses public Kalshi reads only, holds no credentials and cannot place an order.
+
+```sh
+.venv/bin/python -m paper.trader run --hours 24    # one pass every 20 seconds
+.venv/bin/python -m paper.trader report
+```
+
+- A resting bid counts as filled only when a trade prints below it; a taker buy is limited
+  to the size displayed at the ask. Positions are held to the exchange settlement value.
+- State and a journal are kept in `data/paper/`, so a restart resumes. A match that starts
+  while the trader is not running is skipped, because its pre-match price was not observed.
+- WTA and ATP Challenger are the tours the research supports. ATP main tour and WTA
+  Challenger are simulated as "shadow" rows and reported separately.
+
 ---
 
 ## Setup

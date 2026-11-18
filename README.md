@@ -97,7 +97,7 @@ place an order.
 | Tennis dip variants | The same with the bid 10¢ below the pre-match price, and at 65¢ | No |
 | Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
 | NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |
-| College basketball dip | The three tennis dip bids on men's college games | No |
+| College basketball dip | The three tennis dip bids on men's college games | The 80¢ bid only |
 
 Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and
 reported as separate rows.

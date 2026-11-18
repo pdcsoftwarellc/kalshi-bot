@@ -16,13 +16,14 @@ few markets with an order) the order book and the trade record.
   cbb dip (...)    men's college basketball, the same three dip bids as tennis
 
 Tiers. "validated" rows are the ones the research supports: qualifying-round
-matches on WTA and ATP Challenger, and NBA leads of 6+. "main-draw" is the
-rest of those two tours. "shadow" is everything the research did not support
-or did not test: ATP main tour, WTA Challenger, college basketball, NBA leads
-under 6.
+matches on WTA and ATP Challenger, men's college basketball, and NBA leads of
+6+. "main-draw" is the rest of those two tennis tours. "shadow" is everything
+the research did not support or did not test: ATP main tour, WTA Challenger,
+NBA leads under 6.
 
-With `--live`, a validated row of a rule named in --live-rules (default: only
-the tennis dip) is also sent to the production Kalshi account as a real order
+With `--live`, a validated row of a rule named in --live-rules (default: the
+80c dip bid in tennis and college basketball) is also sent to the production
+Kalshi account as a real order
 (real money). Everything else stays simulated. New live orders stop when open
 exposure would pass --max-exposure, when settled live losses reach --max-loss,
 or while a file named STOP exists in the state folder.
@@ -53,10 +54,10 @@ from paper import rules
 from paper.broker import Broker, BrokerError
 
 OUT = ROOT / "data/paper"
-# Series that get dip bids: (rule prefix, tier). Only "validated" tennis rows are ever sent live.
+# Series that get dip bids: (rule prefix, tier). Only "validated" rows of a rule in --live-rules are sent live.
 DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis", "validated"),
         "KXATPMATCH": ("tennis", "shadow"), "KXWTACHALLENGERMATCH": ("tennis", "shadow"),
-        "KXNCAAMBGAME": ("cbb", "shadow")}
+        "KXNCAAMBGAME": ("cbb", "validated")}
 NBA = "KXNBAGAME"
 SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL, HORIZON = 300, 8, 600, 60, 12*3600
 CLIP = 100                                    # contracts per trade for the dollar figures
@@ -481,7 +482,8 @@ def main():
     parser.add_argument("--contracts", type=int, default=5, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
-    parser.add_argument("--live-rules", nargs="+", choices=("tennis_dip", "nba_take"), default=["tennis_dip"],
+    parser.add_argument("--live-rules", nargs="+", choices=("tennis_dip", "cbb_dip", "nba_take"),
+                        default=["tennis_dip", "cbb_dip"],
                         help="rules allowed to place real orders; everything else is simulated")
     args = parser.parse_args()
     if args.command == "report":

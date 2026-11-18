@@ -160,7 +160,7 @@ def test_nba_take_and_rest(tmp_path):
 
 
 class FakeBroker:
-    contracts, max_exposure, max_loss, rules = 5, 10, 30, ("tennis_dip", "nba_take")
+    contracts, max_exposure, max_loss, rules = 5, 10, 30, ("tennis_dip", "cbb_dip", "nba_take")
 
     def __init__(self):
         self.sent, self.fills = [], {}
@@ -223,7 +223,7 @@ def test_small_nba_leads_are_simulated_only_until_the_lead_grows(tmp_path):
     assert broker.sent == [(ticker, "no", 98, 5, False)]
 
 
-def test_college_basketball_dips_are_simulated_only(tmp_path):
+def test_college_basketball_sends_only_the_80c_bid(tmp_path):
     event, ticker = "KXNCAAMBGAME-26NOV18DUKEUNC", "KXNCAAMBGAME-26NOV18DUKEUNC-DUKE"
     api, broker = FakeApi(), FakeBroker()
     api.listing[ticker] = market(ticker, 93, 94)
@@ -235,8 +235,8 @@ def test_college_basketball_dips_are_simulated_only(tmp_path):
     api.books[ticker] = book(92, 94)
     trader.step(T0+260)
     assert [(o["rule"], o["tier"], o["price"]) for o in trader.state["orders"]] == \
-        [("cbb_dip", "shadow", 80), ("cbb_dip_rel", "shadow", 83), ("cbb_dip_deep", "shadow", 65)]
-    assert not broker.sent
+        [("cbb_dip", "validated", 80), ("cbb_dip_rel", "validated", 83), ("cbb_dip_deep", "validated", 65)]
+    assert broker.sent == [(ticker, "yes", 80, 5, True)]
 
 
 def test_dip_bid_rests_on_the_underdogs_market(tmp_path):

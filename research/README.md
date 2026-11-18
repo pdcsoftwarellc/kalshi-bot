@@ -126,6 +126,8 @@ Outputs live under `data/processed/native-atp/market-anchor/` and
 
 The [third batch](parallel-round3.md) tests bookmaker revisions, deciding-set prices, first-set point dominance, routing between player contracts, and a separately recorded point-confirmed odds-revision rule.
 
+The [fourth round](parallel-round4.md) moves to Kalshi-only data across sports and other categories. It covers late-game favourites, resting bids on heavy favourites that dip in play, and about thirty hypotheses that failed, with the evidence for each.
+
 ## Full-match forward pilot
 
 `full_match.py` records the point-confirmed bookmaker revision rule across a prospective Challenger singles cohort. The default run ends when all 30 enrolled fixtures have a terminal record. While the Mac is awake, it discovers listings every minute and enrolls uniquely linked, scheduled fixtures within 20 minutes of the provider's start time, before any evidence of play. Earlier starts have priority when the cohort is nearly full. The roster is keyed by fixture and exchange event, and includes cancellations and zero-signal matches.

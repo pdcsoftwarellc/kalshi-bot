@@ -35,7 +35,7 @@ from research.api_cost import ROOT, UTC, save
 
 RAW = ROOT / "data/raw/live-games"
 OUT = ROOT / "data/processed/dip-scores"
-TENNIS = ("KXATPMATCH", "KXATPCHALLENGERMATCH", "KXWTAMATCH")
+TENNIS = ("KXATPMATCH", "KXATPCHALLENGERMATCH", "KXWTAMATCH", "KXWTACHALLENGERMATCH", "KXITFMATCH", "KXITFWMATCH")
 DEAD = {"closed", "ended", "complete", "completed", "cancelled", "canceled", "postponed", "finished", "final"}
 IDLE = {"not_started", "scheduled", "created", "sch", "", "none"}
 LEVELS = (80, 70, 65)

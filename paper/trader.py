@@ -4,36 +4,40 @@ Without `--live` it makes public Kalshi reads only and cannot place an order.
 Every pass it reads the open markets, Kalshi's live game state, and (for the
 few markets with an order) the order book and the trade record.
 
-  tennis dip      favourite at 90c+ before play, a resting 80c bid from the
-                  first live pass, filled only when a trade prints below 80c
-  tennis dip rel  the same, with the bid 10c below the pre-match price
-  nba take        4th quarter or overtime, leader ahead by 6+ with its ask at
-                  97-99c: buy at the ask, limited to the size displayed there
-  nba rest        the same signal, a bid 1c below the ask instead
+  tennis dip       favourite at 90c+ before play, a resting 80c bid from the
+                   first live pass, filled only when a trade prints below 80c.
+                   The bid rests on the underdog's market (as NO) when there is one.
+  tennis dip rel   the same, with the bid 10c below the pre-match price
+  tennis dip deep  the same, with the bid at 65c
+  tennis prematch  qualifying-round favourite at 90c+: buy at the ask before play
+  nba take         4th quarter or overtime, leader ahead by 6+ with its ask at
+                   97-99c: buy at the ask, limited to the size displayed there
+  nba rest         the same signal, a bid 1c below the ask instead
+  cbb dip (...)    men's college basketball, the same three dip bids as tennis
 
-WTA and ATP Challenger are the tennis tours the research supports. ATP main
-tour and WTA Challenger are simulated too, labelled "shadow": the first lost
-in research and the second was never tested. NBA leads under 6 points are
-also "shadow": they carried five of the eight losses in research.
+Tiers. "validated" rows are the ones the research supports: qualifying-round
+matches on WTA and ATP Challenger, and NBA leads of 6+. "main-draw" is the
+rest of those two tours. "shadow" is everything the research did not support
+or did not test: ATP main tour, WTA Challenger, college basketball, NBA leads
+under 6.
 
-With `--live`, every simulated order on a supported tour also goes to the
-production Kalshi account as a real order (real money): the tennis bid rests
-until the market closes, and the NBA buy is immediate-or-cancel at the ask.
-The relative tennis bid, the NBA resting version and every shadow row stay
-simulated. New live orders
-stop when open exposure would pass --max-exposure, when settled live losses
-reach --max-loss, or while a file named STOP exists in the state folder.
+With `--live`, a validated row of a rule named in --live-rules (default: only
+the tennis dip) is also sent to the production Kalshi account as a real order
+(real money). Everything else stays simulated. New live orders stop when open
+exposure would pass --max-exposure, when settled live losses reach --max-loss,
+or while a file named STOP exists in the state folder.
 
 State is saved after every pass, so a restart resumes where it stopped.
 
   .venv/bin/python -m paper.trader run --hours 24
-  .venv/bin/python -m paper.trader run --hours 24 --live --contracts 5
+  .venv/bin/python -m paper.trader run --hours 336 --live --contracts 5
   .venv/bin/python -m paper.trader report
 """
 import argparse
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import random
 from statistics import mean, median
@@ -49,10 +53,12 @@ from paper import rules
 from paper.broker import Broker, BrokerError
 
 OUT = ROOT / "data/paper"
-TENNIS = {"KXWTAMATCH": "validated", "KXATPCHALLENGERMATCH": "validated",
-          "KXATPMATCH": "shadow", "KXWTACHALLENGERMATCH": "shadow"}
+# Series that get dip bids: (rule prefix, tier). Only "validated" tennis rows are ever sent live.
+DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis", "validated"),
+        "KXATPMATCH": ("tennis", "shadow"), "KXWTACHALLENGERMATCH": ("tennis", "shadow"),
+        "KXNCAAMBGAME": ("cbb", "shadow")}
 NBA = "KXNBAGAME"
-SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL = 300, 8, 600, 60
+SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL, HORIZON = 300, 8, 600, 60, 12*3600
 CLIP = 100                                    # contracts per trade for the dollar figures
 
 
@@ -90,7 +96,7 @@ class Trader:
         file = self.out/"state.json"
         self.state = json.loads(file.read_text()) if file.exists() else dict(watch={}, handled=[], orders=[])
         self.handled = set(self.state["handled"])
-        self.known, self.refreshed = {}, 0.0
+        self.known, self.refreshed, self.pairs, self.by_ticker = {}, 0.0, {}, {}
 
     # ---- reads -------------------------------------------------------------------------------
 
@@ -101,7 +107,7 @@ class Trader:
             page = self.api.get("/milestones", limit=200, category="Sports", minimum_start_date=since, cursor=cursor)
             for m in page.get("milestones", []):
                 for event in m.get("primary_event_tickers") or []:
-                    if event.startswith((*TENNIS, NBA)):
+                    if event.startswith((*DIPS, NBA)):
                         found[event] = m["id"]
             cursor = page.get("cursor")
             if not cursor or not page.get("milestones"):
@@ -110,7 +116,7 @@ class Trader:
     def markets(self):
         """The alphabetically first open market of every event, as the research used."""
         events = defaultdict(list)
-        for series in (*TENNIS, NBA):
+        for series in (*DIPS, NBA):
             cursor = ""
             while True:
                 page = self.api.get("/markets", status="open", series_ticker=series, limit=1000, cursor=cursor)
@@ -119,6 +125,8 @@ class Trader:
                 cursor = page.get("cursor")
                 if not cursor:
                     break
+        self.pairs = dict(events)
+        self.by_ticker = {m["ticker"]: m for group in events.values() for m in group}
         return {event: min(group, key=lambda m: m["ticker"]) for event, group in events.items()}
 
     def live(self, events):
@@ -173,7 +181,7 @@ class Trader:
 
     def send(self, o, available=None):
         """Place the real order behind a simulated one, when live trading is on and the limits allow."""
-        if not self.broker or o["tier"] != "validated" or o["rule"] not in ("tennis_dip", "nba_take"):   # all else is simulated
+        if not self.broker or o["tier"] != "validated" or o["rule"] not in self.broker.rules:   # all else is simulated
             return
         count = self.broker.contracts if available is None else min(self.broker.contracts, int(available))
         cost = count*o["price"]/100
@@ -211,11 +219,11 @@ class Trader:
 
     # ---- rules -------------------------------------------------------------------------------
 
-    def tennis(self, markets, live, now):
+    def dips(self, markets, live, now):
         watch = self.state["watch"]
         for event, m in markets.items():
             series = m["ticker"].split("-")[0]
-            if series not in TENNIS or event in self.handled or event not in live:
+            if series not in DIPS or event in self.handled or event not in live:
                 continue
             status = str(live[event].get("status", "")).lower()
             if status in rules.PRE:
@@ -224,28 +232,62 @@ class Trader:
                     watch.pop(event, None)             # a wide or one-sided quote restarts the pre-match price
                 else:
                     watch[event] = (watch.get(event, [])+[[now, sum(quote)/2]])[-rules.KEEP_QUOTES:]
+                    self.prematch(event, m, now)
                 continue
             quotes = watch.get(event, [])
             fresh = quotes and now-quotes[-1][0] <= STALE_QUOTES
-            pick = rules.favourite(quotes) if status in rules.TENNIS_LIVE and fresh else None
+            pick = rules.favourite(quotes) if status in rules.DIP_LIVE and fresh else None
+            # Buy the favourite as NO on the underdog's market when there is one: it carries most of the
+            # trading and prints the dip first. The pre-match price still comes from the first-listed market.
+            target, side = m, pick and pick[0]
+            others = [x for x in self.pairs.get(event, []) if x["ticker"] != m["ticker"]]
+            if side == "yes" and len(others) == 1:
+                target, side = others[0], "no"
             # Read the book before marking the match handled, so a failed read is retried next pass.
-            book = rules.top(self.api.get(f'/markets/{m["ticker"]}/orderbook'))[pick[0]] if pick else None
+            book = rules.top(self.api.get(f'/markets/{target["ticker"]}/orderbook'))[side] if pick else None
             watch.pop(event, None)
             self.handled.add(event)
-            if status in rules.TENNIS_LIVE and not fresh:
+            if status in rules.DIP_LIVE and not fresh:
                 self.log("skip", event=event, why="start not observed")
             if not pick:
                 continue                               # not live, or no stable favourite at 90c+
-            side, start = pick
+            start = pick[1]
             if book["ask"] is None or book["ask"] <= rules.DIP_BID:
                 self.log("skip", event=event, why="price already at the bid", ask=book["ask"])
                 continue
-            common = dict(tier=TENNIS[series], kind="rest", event=event, ticker=m["ticker"], side=side, start=start,
-                          ask_when_placed=book["ask"])
-            self.send(self.order(now, rule="tennis_dip", price=rules.DIP_BID, **common))
-            near = round(start)-rules.DIP_RELATIVE     # simulated only: a bid set relative to the pre-match price
+            prefix, tier = DIPS[series]
+            early = prefix == "tennis" and rules.qualifying(m)
+            if prefix == "tennis" and tier == "validated" and not early:
+                tier = "main-draw"                     # real orders are for qualifying rounds, where the evidence is
+            common = dict(tier=tier, kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
+                          ask_when_placed=book["ask"], round="qualifying" if early else "main draw")
+            self.send(self.order(now, rule=f"{prefix}_dip", price=rules.DIP_BID, **common))
+            near = math.floor(start)-rules.DIP_RELATIVE     # simulated only: a bid set relative to the pre-match price
             if near != rules.DIP_BID and book["ask"] > near:
-                self.order(now, rule="tennis_dip_rel", price=near, **common)
+                self.order(now, rule=f"{prefix}_dip_rel", price=near, **common)
+            self.order(now, rule=f"{prefix}_dip_deep", price=rules.DIP_DEEP, **common)   # simulated only: a second, deeper bid
+
+    def prematch(self, event, m, now):
+        """Simulated only: buy a qualifying-round tennis favourite at 90c+ before play, on the cheaper book."""
+        series, key = m["ticker"].split("-")[0], event+":pre"
+        if DIPS[series][0] != "tennis" or key in self.handled or not rules.qualifying(m):
+            return
+        pick = rules.favourite(self.state["watch"][event])
+        if not pick:
+            return
+        offers = [(m["ticker"], pick[0])]
+        others = [x for x in self.pairs.get(event, []) if x["ticker"] != m["ticker"]]
+        if len(others) == 1:
+            offers.append((others[0]["ticker"], "no" if pick[0] == "yes" else "yes"))
+        books = [(rules.top(self.api.get(f"/markets/{ticker}/orderbook"))[side], ticker, side) for ticker, side in offers]
+        books = [b for b in books if b[0]["ask"] is not None and b[0]["ask"] < 100]
+        self.handled.add(key)
+        if not books:
+            return
+        book, ticker, side = min(books, key=lambda b: b[0]["ask"])
+        o = self.order(now, rule="tennis_prematch", tier=DIPS[series][1], kind="take", event=event, ticker=ticker,
+                       side=side, price=book["ask"], start=pick[1], round="qualifying")
+        o.update(status="filled", filled_at=now, size=book["ask_size"])
 
     def nba(self, markets, live, now):
         for event, m in markets.items():
@@ -284,7 +326,7 @@ class Trader:
         for o in self.state["orders"]:
             if o["kind"] != "rest" or o["status"] not in ("open", "filled"):
                 continue
-            m, near = markets.get(o["event"]), o["rule"] == "nba_rest"
+            m, near = self.by_ticker.get(o["ticker"]), o["rule"] == "nba_rest"
             if m and o["status"] == "open" and not near:
                 try:
                     ask = 100*float(m["yes_ask_dollars"]) if o["side"] == "yes" else 100-100*float(m["yes_bid_dollars"])
@@ -346,8 +388,11 @@ class Trader:
         if now-self.refreshed > 300:
             self.known, self.refreshed = self.milestones(now), now
         markets = self.markets()
-        live = self.live(set(markets) | {o["event"] for o in self.state["orders"] if o["status"] in ("open", "filled")})
-        self.tennis(markets, live, now)
+        # Game state is only needed for events about to start or under way, and for events holding an order.
+        soon = {e for e, m in markets.items()
+                if not m.get("expected_expiration_time") or stamp(m["expected_expiration_time"]) < now+HORIZON}
+        live = self.live(soon | {o["event"] for o in self.state["orders"] if o["status"] in ("open", "filled")})
+        self.dips(markets, live, now)
         self.nba(markets, live, now)
         self.fills(markets, now)
         self.settle(markets, live, now)
@@ -436,14 +481,16 @@ def main():
     parser.add_argument("--contracts", type=int, default=5, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
+    parser.add_argument("--live-rules", nargs="+", choices=("tennis_dip", "nba_take"), default=["tennis_dip"],
+                        help="rules allowed to place real orders; everything else is simulated")
     args = parser.parse_args()
     if args.command == "report":
         report(args.dir)
         return
     broker = None
     if args.live:
-        broker = Broker(args.contracts, args.max_exposure, args.max_loss)
-        print(f"LIVE: real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
+        broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules)
+        print(f"LIVE ({', '.join(args.live_rules)}): real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
               f"an order, at most ${args.max_exposure:.0f} unsettled, stop after ${args.max_loss:.0f} lost", flush=True)
     trader, stop, passes = Trader(Api(), args.dir, broker), time.time()+args.hours*3600, 0
     while time.time() < stop:

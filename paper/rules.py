@@ -8,15 +8,21 @@ that ask. Evidence for both is in research/parallel-round4.md.
 Prices are whole cents on the side being bought ("yes" or "no").
 """
 from datetime import datetime
+import re
 from statistics import median
 
 PRE = {"not_started", "scheduled"}
-TENNIS_LIVE = {"live"}
+DIP_LIVE = {"live", "inprogress"}
 DONE = {"closed", "ended", "complete", "finished", "final", "cancelled", "canceled"}
 
-DIP_START, DIP_BID, DIP_RELATIVE = 90, 80, 10
+DIP_START, DIP_BID, DIP_RELATIVE, DIP_DEEP = 90, 80, 10, 65
 MIN_QUOTES, KEEP_QUOTES, MIN_SPAN, MAX_SPREAD, MAX_RANGE = 10, 15, 180, 4, 3
 NBA_BAND, NBA_MIN_LEAD = (97, 99), 6
+
+
+def qualifying(market):
+    """True for a tennis qualifying-round match, read from the market's rules text."""
+    return bool(re.search(r"\bQualif", market.get("rules_primary") or ""))
 
 
 def top(book):

@@ -95,10 +95,11 @@ def test_tennis_dip_from_pre_match_to_settlement(tmp_path):
     api.books[ticker] = book(91, 93)
     start = T0+260
     trader.step(start)
-    order, relative = trader.state["orders"]
+    order, relative, deep = trader.state["orders"]
+    assert (deep["rule"], deep["price"]) == ("tennis_dip_deep", 65)
     assert (relative["rule"], relative["price"]) == ("tennis_dip_rel", 83)
     assert (order["rule"], order["tier"], order["side"], order["price"], order["start"], order["status"]) == \
-        ("tennis_dip", "validated", "yes", 80, 93.0, "open")
+        ("tennis_dip", "main-draw", "yes", 80, 93.0, "open")
 
     api.listing[ticker] = market(ticker, 82, 84)                 # near the bid: the tape is read every pass
     api.tape[ticker] = [trade(start+30, 80, 40)]
@@ -117,8 +118,8 @@ def test_tennis_dip_from_pre_match_to_settlement(tmp_path):
     # A restart reads the same state and does not place a second order for the match.
     again = Trader(api, tmp_path)
     again.step(start+1100)
-    assert len(again.state["orders"]) == 2
-    row = summary(again.state["orders"])["tennis_dip (validated)"]
+    assert len(again.state["orders"]) == 3
+    row = summary(again.state["orders"])["tennis_dip (main-draw)"]
     assert (row["fills"], row["win_rate"], row["net_cents"], row["dollars_at_clip"]) == (1, 1.0, 20, 5.0)
 
 
@@ -159,7 +160,7 @@ def test_nba_take_and_rest(tmp_path):
 
 
 class FakeBroker:
-    contracts, max_exposure, max_loss = 5, 10, 30
+    contracts, max_exposure, max_loss, rules = 5, 10, 30, ("tennis_dip", "nba_take")
 
     def __init__(self):
         self.sent, self.fills = [], {}
@@ -220,3 +221,79 @@ def test_small_nba_leads_are_simulated_only_until_the_lead_grows(tmp_path):
     trader.step(T0+40)
     assert [o["tier"] for o in trader.state["orders"]] == ["shadow", "shadow", "validated", "validated"]
     assert broker.sent == [(ticker, "no", 98, 5, False)]
+
+
+def test_college_basketball_dips_are_simulated_only(tmp_path):
+    event, ticker = "KXNCAAMBGAME-26NOV18DUKEUNC", "KXNCAAMBGAME-26NOV18DUKEUNC-DUKE"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = market(ticker, 93, 94)
+    api.states[event] = dict(status="scheduled")
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="inprogress", period=1, home_points=2, away_points=0)
+    api.books[ticker] = book(92, 94)
+    trader.step(T0+260)
+    assert [(o["rule"], o["tier"], o["price"]) for o in trader.state["orders"]] == \
+        [("cbb_dip", "shadow", 80), ("cbb_dip_rel", "shadow", 83), ("cbb_dip_deep", "shadow", 65)]
+    assert not broker.sent
+
+
+def test_dip_bid_rests_on_the_underdogs_market(tmp_path):
+    event, fav, dog = "KXWTAMATCH-26NOV18AAABBB", "KXWTAMATCH-26NOV18AAABBB-AAA", "KXWTAMATCH-26NOV18AAABBB-BBB"
+    api = FakeApi()
+    api.listing[fav], api.listing[dog] = market(fav, 92, 94), market(dog, 6, 8)
+    api.states[event] = dict(status="not_started")
+    trader = Trader(api, tmp_path)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="live")
+    api.books[dog] = book(6, 8)                                  # buying NO there costs 100-6 = 94c
+    start = T0+260
+    trader.step(start)
+    order = trader.state["orders"][0]
+    assert (order["ticker"], order["side"], order["price"], order["ask_when_placed"]) == (dog, "no", 80, 94)
+
+    api.listing[dog] = market(dog, 19, 22)
+    api.tape[dog] = [trade(start+30, 21, 12)]                    # the underdog's YES at 21c is the favourite at 79c
+    trader.step(start+40)
+    assert order["status"] == "filled" and order["size_through"] == 12
+
+    del api.listing[fav], api.listing[dog]
+    api.settled[dog] = dict(status="finalized", settlement_value_dollars="0.0000", settlement_ts=iso(start+900))
+    trader.step(start+1000)
+    assert (order["status"], order["payout"], order["net"]) == ("settled", 1.0, 20)
+
+
+def test_only_qualifying_tennis_matches_send_real_orders(tmp_path):
+    event, fav, dog = "KXWTAMATCH-26NOV18AAABBB", "KXWTAMATCH-26NOV18AAABBB-AAA", "KXWTAMATCH-26NOV18AAABBB-BBB"
+    api, broker = FakeApi(), FakeBroker()
+    text = "If A wins the A vs B professional tennis match in the 2026 WTA Tokyo Qualification Round 1 ..."
+    api.listing[fav], api.listing[dog] = dict(market(fav, 92, 94), rules_primary=text), dict(market(dog, 6, 8), rules_primary=text)
+    api.books[fav], api.books[dog] = book(92, 94), book(7, 9)   # NO on the underdog's book costs 93c, a cent cheaper
+    api.states[event] = dict(status="not_started")
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    (early,) = trader.state["orders"]                            # the simulated pre-match buy, once
+    assert (early["rule"], early["ticker"], early["side"], early["price"], early["status"]) == \
+        ("tennis_prematch", dog, "no", 93, "filled")
+    assert not broker.sent
+
+    api.states[event] = dict(status="live")
+    trader.step(T0+260)
+    dip = trader.state["orders"][1]
+    assert (dip["rule"], dip["tier"], dip["round"]) == ("tennis_dip", "validated", "qualifying")
+    assert broker.sent == [(dog, "no", 80, 5, True)]             # only the 80c bid is real
+
+
+def test_nba_stays_simulated_unless_named_as_a_live_rule(tmp_path):
+    event, ticker = "KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA"
+    api, broker = FakeApi(), FakeBroker()
+    broker.rules = ("tennis_dip",)
+    api.listing[ticker] = market(ticker, 2, 3)
+    api.states[event] = dict(status="inprogress", period=4, home_points=90, away_points=70)
+    api.books[ticker] = book(2, 3, 800)
+    trader = Trader(api, tmp_path, broker)
+    trader.step(T0)
+    assert len(trader.state["orders"]) == 2 and not broker.sent

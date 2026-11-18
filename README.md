@@ -86,21 +86,30 @@ By default (`python bot.py`) the bot simulates fills in `TradingBot._execute_sig
 
 ### Rule-based paper trader
 
-`paper/` simulates the two rules that survived the [fourth research round](research/parallel-round4.md):
-an 80¢ resting bid on tennis favourites priced 90¢ or more before play, and buying the NBA
-leader at 97–99¢ in the fourth quarter or overtime (at the ask, and with a bid 1¢ below it).
-Without `--live` it uses public Kalshi reads only and cannot place an order.
+`paper/` runs the rules that came out of the [fourth research round](research/parallel-round4.md)
+and the follow-up studies in `research/dip_*.py`, `research/favourite_gap.py` and
+`research/edge_reality.py`. Without `--live` it uses public Kalshi reads only and cannot
+place an order.
 
-With `--live` each simulated order on a supported tour is also sent to the production
-account as a real order (`paper/broker.py`): the tennis bid rests until the market closes,
-and the NBA buy is immediate-or-cancel at the ask. New live orders stop when unsettled
-exposure would pass `--max-exposure`, when settled losses reach `--max-loss`, or while a
-file named `STOP` exists in `data/paper/`. Resting orders already on the exchange stay
-there until the match ends or they are cancelled by hand.
+| Rule | What it does | Real orders with `--live` |
+| --- | --- | --- |
+| Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | Qualifying rounds on WTA and ATP Challenger only |
+| Tennis dip variants | The same with the bid 10¢ below the pre-match price, and at 65¢ | No |
+| Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
+| NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |
+| College basketball dip | The three tennis dip bids on men's college games | No |
+
+Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and
+reported as separate rows.
+
+With `--live`, real orders go to the production account through `paper/broker.py`. New
+live orders stop when unsettled exposure would pass `--max-exposure`, when settled losses
+reach `--max-loss`, or while a file named `STOP` exists in `data/paper/`. Resting orders
+already on the exchange stay there until the match ends or they are cancelled by hand.
 
 ```sh
-.venv/bin/python -m paper.trader run --hours 24    # one pass every 20 seconds
-.venv/bin/python -m paper.trader run --hours 24 --live --contracts 5 --max-exposure 60 --max-loss 30
+.venv/bin/python -m paper.trader run --hours 24    # simulated; one pass every 20 seconds
+.venv/bin/python -m paper.trader run --hours 336 --live --contracts 5 --max-exposure 60 --max-loss 30
 .venv/bin/python -m paper.trader report
 ```
 
@@ -108,8 +117,9 @@ there until the match ends or they are cancelled by hand.
   to the size displayed at the ask. Positions are held to the exchange settlement value.
 - State and a journal are kept in `data/paper/`, so a restart resumes. A match that starts
   while the trader is not running is skipped, because its pre-match price was not observed.
-- WTA and ATP Challenger are the tours the research supports. ATP main tour and WTA
-  Challenger are simulated as "shadow" rows and reported separately.
+- Run only one copy against a state folder.
+- `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both
+  markets' quotes, from 45 minutes before each start, for later score-aware analysis.
 
 ---
 

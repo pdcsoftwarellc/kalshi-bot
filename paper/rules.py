@@ -14,9 +14,9 @@ PRE = {"not_started", "scheduled"}
 TENNIS_LIVE = {"live"}
 DONE = {"closed", "ended", "complete", "finished", "final", "cancelled", "canceled"}
 
-DIP_START, DIP_BID = 90, 80
+DIP_START, DIP_BID, DIP_RELATIVE = 90, 80, 10
 MIN_QUOTES, KEEP_QUOTES, MIN_SPAN, MAX_SPREAD, MAX_RANGE = 10, 15, 180, 4, 3
-NBA_BAND = (97, 99)
+NBA_BAND, NBA_MIN_LEAD = (97, 99), 6
 
 
 def top(book):

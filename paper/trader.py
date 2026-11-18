@@ -4,20 +4,23 @@ Without `--live` it makes public Kalshi reads only and cannot place an order.
 Every pass it reads the open markets, Kalshi's live game state, and (for the
 few markets with an order) the order book and the trade record.
 
-  tennis dip   favourite at 90c+ before play, a resting 80c bid from the first
-               live pass, filled only when a trade prints below 80c
-  nba take     4th quarter or overtime, leader's ask 97-99c: buy at the ask,
-               limited to the size displayed there
-  nba rest     the same signal, a bid 1c below the ask instead
+  tennis dip      favourite at 90c+ before play, a resting 80c bid from the
+                  first live pass, filled only when a trade prints below 80c
+  tennis dip rel  the same, with the bid 10c below the pre-match price
+  nba take        4th quarter or overtime, leader ahead by 6+ with its ask at
+                  97-99c: buy at the ask, limited to the size displayed there
+  nba rest        the same signal, a bid 1c below the ask instead
 
 WTA and ATP Challenger are the tennis tours the research supports. ATP main
 tour and WTA Challenger are simulated too, labelled "shadow": the first lost
-in research and the second was never tested.
+in research and the second was never tested. NBA leads under 6 points are
+also "shadow": they carried five of the eight losses in research.
 
 With `--live`, every simulated order on a supported tour also goes to the
 production Kalshi account as a real order (real money): the tennis bid rests
 until the market closes, and the NBA buy is immediate-or-cancel at the ask.
-The NBA resting version and the shadow tours stay simulated. New live orders
+The relative tennis bid, the NBA resting version and every shadow row stay
+simulated. New live orders
 stop when open exposure would pass --max-exposure, when settled live losses
 reach --max-loss, or while a file named STOP exists in the state folder.
 
@@ -170,7 +173,7 @@ class Trader:
 
     def send(self, o, available=None):
         """Place the real order behind a simulated one, when live trading is on and the limits allow."""
-        if not self.broker or o["tier"] != "validated" or o["rule"] not in ("tennis_dip", "nba_take"):
+        if not self.broker or o["tier"] != "validated" or o["rule"] not in ("tennis_dip", "nba_take"):   # all else is simulated
             return
         count = self.broker.contracts if available is None else min(self.broker.contracts, int(available))
         cost = count*o["price"]/100
@@ -237,8 +240,12 @@ class Trader:
             if book["ask"] is None or book["ask"] <= rules.DIP_BID:
                 self.log("skip", event=event, why="price already at the bid", ask=book["ask"])
                 continue
-            self.send(self.order(now, rule="tennis_dip", tier=TENNIS[series], kind="rest", event=event, ticker=m["ticker"],
-                                 side=side, price=rules.DIP_BID, start=start, ask_when_placed=book["ask"]))
+            common = dict(tier=TENNIS[series], kind="rest", event=event, ticker=m["ticker"], side=side, start=start,
+                          ask_when_placed=book["ask"])
+            self.send(self.order(now, rule="tennis_dip", price=rules.DIP_BID, **common))
+            near = round(start)-rules.DIP_RELATIVE     # simulated only: a bid set relative to the pre-match price
+            if near != rules.DIP_BID and book["ask"] > near:
+                self.order(now, rule="tennis_dip_rel", price=near, **common)
 
     def nba(self, markets, live, now):
         for event, m in markets.items():
@@ -246,6 +253,12 @@ class Trader:
                 continue
             side = rules.nba_leader(event, m["ticker"], live[event])
             if not side:
+                continue
+            # Small leads lost money in research: they are simulated once as "shadow" and never sent live,
+            # and the game stays eligible for a real entry if the lead grows.
+            small = abs(int(live[event]["home_points"])-int(live[event]["away_points"])) < rules.NBA_MIN_LEAD
+            key = event+":small" if small else event
+            if key in self.handled:
                 continue
             try:                                       # the cached listing only decides whether a book read is worth it
                 rough = 100*float(m["yes_ask_dollars"]) if side == "yes" else 100-100*float(m["yes_bid_dollars"])
@@ -259,8 +272,8 @@ class Trader:
             s = live[event]
             seen = dict(period=s.get("period"), clock=s.get("period_remaining_time"),
                         score=f'{s.get("away_points")}-{s.get("home_points")}', ask_size=book["ask_size"], bid=book["bid"])
-            self.handled.add(event)
-            common = dict(tier="validated", event=event, ticker=m["ticker"], side=side, **seen)
+            self.handled.add(key)
+            common = dict(tier="shadow" if small else "validated", event=event, ticker=m["ticker"], side=side, **seen)
             take = self.order(now, rule="nba_take", kind="take", price=book["ask"], **common)
             take.update(status="filled", filled_at=now, size=book["ask_size"])
             self.send(take, available=book["ask_size"])

@@ -28,6 +28,7 @@ from research.near_end import WINDOW, cents
 
 OUT = ROOT / "data/processed/favorite-dip"
 GROUPS = {"tennis": ("KXATPMATCH", "KXATPCHALLENGERMATCH", "KXWTAMATCH"), "nba": ("KXNBAGAME",),
+          "itf-men": ("KXITFMATCH",), "itf-women": ("KXITFWMATCH",), "wta-challenger": ("KXWTACHALLENGERMATCH",),
           "mlb": ("KXMLBGAME",), "nhl": ("KXNHLGAME",), "nfl": ("KXNFLGAME",)}
 START, END = date(2026, 9, 1), date(2026, 11, 16)       # the listing window already cached by near_end.py
 BUCKETS = ((70, 80), (80, 90), (90, 101))
@@ -164,7 +165,7 @@ def main():
                         print(f'  pre-game {lo}-{min(hi, 100)}c bid {limit}c {name:7} orders {s["orders"]:4} fills {s["fills"]:4} '
                               f'({s["fill_rate"]:.0%}) win {s["win_rate"]:.3f} need {s["needed"]:.2f} net {s["net_cents"]:+.1f}c ci {ci} '
                               f'run-over {s["mid_one_minute_later_vs_limit"] or 0:+.1f}c per order {s["profit_per_order_cents"]:+.2f}c')
-    save(OUT/f"summary{tag}.json", report)
+    save(OUT/f"summary{tag}{'' if args.groups == ['tennis'] else '-'+'-'.join(args.groups)}.json", report)
 
 
 if __name__ == "__main__":

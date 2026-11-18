@@ -155,3 +155,50 @@ def test_nba_take_and_rest(tmp_path):
     trader.step(T0+700)
     assert (take["status"], take["payout"]) == ("settled", 1.0) and take["net"] == pytest.approx(2-.1372)
     assert rest["status"] == "expired" and "net" not in rest
+
+
+class FakeBroker:
+    contracts, max_exposure, max_loss = 5, 10, 30
+
+    def __init__(self):
+        self.sent, self.fills = [], {}
+
+    def buy(self, ticker, side, price, count, rest, post_only=False):
+        self.sent.append((ticker, side, price, count, rest))
+        order_id = f"o{len(self.sent)}"
+        self.fills[order_id] = 0 if rest else count
+        return dict(order_id=order_id, fill_count=str(self.fills[order_id]))
+
+    def order(self, order_id):
+        filled = self.fills[order_id]
+        return dict(status="executed", filled=filled, remaining=0, cost=filled*.98, fees=.01 if filled else 0)
+
+
+def test_live_orders_follow_the_validated_rules_and_limits(tmp_path):
+    event, ticker = "KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = market(ticker, 2, 3)
+    api.states[event] = dict(status="inprogress", period=4, home_points=90, away_points=70)
+    api.books[ticker] = book(2, 3, 3)                            # only three contracts displayed at the ask
+    trader = Trader(api, tmp_path, broker)
+    trader.step(T0)
+    take, rest = trader.state["orders"]
+    assert broker.sent == [(ticker, "no", 98, 3, False)]         # the resting version stays simulated
+    assert take["live"]["filled"] == 3 and "live" not in rest
+    assert trader.exposure() == pytest.approx(2.94)
+
+    del api.listing[ticker]
+    api.settled[ticker] = dict(status="finalized", settlement_value_dollars="0.0000", settlement_ts=iso(T0+600))
+    trader.step(T0+700)
+    assert take["live"]["pnl"] == pytest.approx(3-2.94-.01)
+    assert summary(trader.state["orders"])["nba_take (validated)"]["live"]["simulated_fill_agrees"] == 1
+
+    # A second game would pass the $10 exposure cap only if the first were still open; a STOP file blocks it anyway.
+    (tmp_path/"STOP").touch()
+    event2, ticker2 = "KXNBAGAME-26NOV17BOSNYK", "KXNBAGAME-26NOV17BOSNYK-BOS"
+    api.listing[ticker2] = market(ticker2, 2, 3)
+    api.states[event2] = dict(status="inprogress", period=4, home_points=90, away_points=70)
+    api.books[ticker2] = book(2, 3, 800)
+    trader.known, trader.refreshed = {}, 0
+    trader.step(T0+800)
+    assert len(trader.state["orders"]) == 4 and len(broker.sent) == 1

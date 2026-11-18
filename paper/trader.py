@@ -1,8 +1,8 @@
-"""Paper trader for the tennis dip rule and the NBA late-favourite rule.
+"""Trader for the tennis dip rule and the NBA late-favourite rule: simulated, or live with `--live`.
 
-Public Kalshi reads only: it holds no credentials and cannot place an order.
+Without `--live` it makes public Kalshi reads only and cannot place an order.
 Every pass it reads the open markets, Kalshi's live game state, and (for the
-few markets with a simulated order) the order book and the trade record.
+few markets with an order) the order book and the trade record.
 
   tennis dip   favourite at 90c+ before play, a resting 80c bid from the first
                live pass, filled only when a trade prints below 80c
@@ -14,9 +14,17 @@ WTA and ATP Challenger are the tennis tours the research supports. ATP main
 tour and WTA Challenger are simulated too, labelled "shadow": the first lost
 in research and the second was never tested.
 
+With `--live`, every simulated order on a supported tour also goes to the
+production Kalshi account as a real order (real money): the tennis bid rests
+until the market closes, and the NBA buy is immediate-or-cancel at the ask.
+The NBA resting version and the shadow tours stay simulated. New live orders
+stop when open exposure would pass --max-exposure, when settled live losses
+reach --max-loss, or while a file named STOP exists in the state folder.
+
 State is saved after every pass, so a restart resumes where it stopped.
 
   .venv/bin/python -m paper.trader run --hours 24
+  .venv/bin/python -m paper.trader run --hours 24 --live --contracts 5
   .venv/bin/python -m paper.trader report
 """
 import argparse
@@ -35,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import config
 from paper import rules
+from paper.broker import Broker, BrokerError
 
 OUT = ROOT / "data/paper"
 TENNIS = {"KXWTAMATCH": "validated", "KXATPCHALLENGERMATCH": "validated",
@@ -72,8 +81,8 @@ def stamp(text):
 
 
 class Trader:
-    def __init__(self, api, out=OUT):
-        self.api, self.out = api, Path(out)
+    def __init__(self, api, out=OUT, broker=None):
+        self.api, self.out, self.broker = api, Path(out), broker
         self.out.mkdir(parents=True, exist_ok=True)
         file = self.out/"state.json"
         self.state = json.loads(file.read_text()) if file.exists() else dict(watch={}, handled=[], orders=[])
@@ -145,6 +154,58 @@ class Trader:
         self.log("order", **{k: row[k] for k in ("id", "rule", "tier", "event", "side", "price", "status")})
         return row
 
+    # ---- live orders -------------------------------------------------------------------------
+
+    def exposure(self):
+        """Dollars committed to live orders that have not settled, counting resting orders in full."""
+        total = 0.0
+        for o in self.state["orders"]:
+            live = o.get("live") or {}
+            if "order_id" in live and "pnl" not in live:
+                total += (live["count"] if o["kind"] == "rest" and o["status"] in ("open", "filled") else live["filled"])*o["price"]/100
+        return total
+
+    def realized(self):
+        return sum((o.get("live") or {}).get("pnl", 0) for o in self.state["orders"])
+
+    def send(self, o, available=None):
+        """Place the real order behind a simulated one, when live trading is on and the limits allow."""
+        if not self.broker or o["tier"] != "validated" or o["rule"] not in ("tennis_dip", "nba_take"):
+            return
+        count = self.broker.contracts if available is None else min(self.broker.contracts, int(available))
+        cost = count*o["price"]/100
+        why = ("STOP file present" if (self.out/"STOP").exists()
+               else "loss limit reached" if self.realized() <= -self.broker.max_loss
+               else "exposure limit" if self.exposure()+cost > self.broker.max_exposure
+               else "nothing displayed" if count < 1 else None)
+        if why:
+            self.log("live_skip", id=o["id"], event=o["event"], why=why)
+            return
+        try:
+            sent = self.broker.buy(o["ticker"], o["side"], o["price"], count, rest=o["kind"] == "rest")
+        except (BrokerError, httpx.HTTPError, KeyError, ValueError) as exc:
+            o["live"] = dict(error=str(exc)[:200])
+            self.log("live_error", id=o["id"], event=o["event"], error=o["live"]["error"])
+            return
+        o["live"] = dict(order_id=sent["order_id"], count=count, filled=float(sent.get("fill_count") or 0))
+        self.log("live_order", id=o["id"], event=o["event"], side=o["side"], price=o["price"], count=count,
+                 filled=o["live"]["filled"])
+
+    def refresh(self, o):
+        """Read a live order's fills from the exchange. Returns False when the read failed."""
+        live = o.get("live") or {}
+        if "order_id" not in live:
+            return True
+        try:
+            seen = self.broker.order(live["order_id"])
+        except (BrokerError, httpx.HTTPError, KeyError, ValueError) as exc:
+            self.log("live_error", id=o["id"], event=o["event"], error=str(exc)[:200])
+            return False
+        if seen["filled"] > live["filled"]:
+            self.log("live_fill", id=o["id"], event=o["event"], filled=seen["filled"], cost=seen["cost"])
+        live.update(filled=seen["filled"], cost=seen["cost"], fees=seen["fees"], exchange_status=seen["status"])
+        return True
+
     # ---- rules -------------------------------------------------------------------------------
 
     def tennis(self, markets, live, now):
@@ -176,8 +237,8 @@ class Trader:
             if book["ask"] is None or book["ask"] <= rules.DIP_BID:
                 self.log("skip", event=event, why="price already at the bid", ask=book["ask"])
                 continue
-            self.order(now, rule="tennis_dip", tier=TENNIS[series], kind="rest", event=event, ticker=m["ticker"],
-                       side=side, price=rules.DIP_BID, start=start, ask_when_placed=book["ask"])
+            self.send(self.order(now, rule="tennis_dip", tier=TENNIS[series], kind="rest", event=event, ticker=m["ticker"],
+                                 side=side, price=rules.DIP_BID, start=start, ask_when_placed=book["ask"]))
 
     def nba(self, markets, live, now):
         for event, m in markets.items():
@@ -202,6 +263,7 @@ class Trader:
             common = dict(tier="validated", event=event, ticker=m["ticker"], side=side, **seen)
             take = self.order(now, rule="nba_take", kind="take", price=book["ask"], **common)
             take.update(status="filled", filled_at=now, size=book["ask_size"])
+            self.send(take, available=book["ask_size"])
             self.order(now, rule="nba_rest", kind="rest", price=book["ask"]-1, **common)
 
     def fills(self, markets, now):
@@ -223,6 +285,8 @@ class Trader:
             o["size_through"] = o.get("size_through", 0)+found["size_through"]
             o["size_at"] = o.get("size_at", 0)+found["size_at"]
             o["touched_at"] = o.get("touched_at") or found["touched_at"]
+            if self.broker:
+                self.refresh(o)
             if o["status"] == "open" and found["filled_at"]:
                 o.update(status="filled", filled_at=found["filled_at"])
                 self.log("fill", id=o["id"], rule=o["rule"], event=o["event"], price=o["price"],
@@ -243,6 +307,12 @@ class Trader:
                 continue
             if m.get("status") not in ("finalized", "settled") or not m.get("settlement_ts"):
                 continue
+            live = o.get("live") or {}
+            if "order_id" in live:                     # the exchange's own record decides the live result
+                if not self.broker or not self.refresh(o):
+                    continue
+                payout = value if o["side"] == "yes" else 1-value
+                live["pnl"] = live["filled"]*payout-live["cost"]-live["fees"]
             if o["kind"] == "rest":                    # trades that printed between the last check and the close
                 found = rules.prints(self.trades(o["ticker"], o["seen"]-1), o["side"], o["price"], o["seen"])
                 o["size_through"] = o.get("size_through", 0)+found["size_through"]
@@ -256,7 +326,7 @@ class Trader:
                     o["size"] = o["size_through"]
             o["status"] = "settled" if o["status"] == "filled" else "expired"
             self.log("settle", id=o["id"], rule=o["rule"], event=o["event"], status=o["status"],
-                     payout=o["payout"], net=o.get("net"))
+                     payout=o["payout"], net=o.get("net"), live_pnl=live.get("pnl"))
 
     def step(self, now=None):
         now = now or time.time()
@@ -305,6 +375,15 @@ def summary(orders):
                        net_with_taker_fee=mean(o["net"]-(0 if o["kind"] == "take" else rules.taker_fee(o["price"])) for o in won),
                        median_size=median(o.get("size") or 0 for o in won),
                        dollars_at_clip=sum(o["net"]*min(CLIP, o.get("size") or 0) for o in won)/100)
+        sent = [o["live"] for o in rows if "order_id" in (o.get("live") or {})]
+        if sent:                                       # real orders, in dollars, from the exchange's own figures
+            closed = [l for l in sent if "pnl" in l]
+            row["live"] = dict(orders=len(sent), with_fills=sum(l["filled"] > 0 for l in sent),
+                               contracts_filled=sum(l["filled"] for l in sent), settled=len(closed),
+                               paid=sum(l.get("cost", 0) for l in closed), fees=sum(l.get("fees", 0) for l in closed),
+                               pnl=sum(l["pnl"] for l in closed),
+                               simulated_fill_agrees=sum((l["filled"] > 0) == (o["status"] in ("filled", "settled"))
+                                                         for o in rows for l in [o.get("live") or {}] if "order_id" in l))
         out[f"{rule} ({tier})"] = row
     return out
 
@@ -326,6 +405,11 @@ def report(out=OUT):
             print(f'  won {r["win_rate"]:.1%} against {r["needed"]:.1%} needed, losses {r["losses"]}, net {r["net_cents"]:+.2f}c per contract '
                   f'(95% interval {r["ci95"]}), {r["net_with_taker_fee"]:+.2f}c with the full taker fee')
             print(f'  median size available {r["median_size"]:.0f} contracts; ${r["dollars_at_clip"]:+.2f} at up to {CLIP} contracts a trade')
+        if "live" in r:
+            l = r["live"]
+            print(f'  LIVE: {l["orders"]} real orders, {l["with_fills"]} with fills ({l["contracts_filled"]:.0f} contracts), '
+                  f'{l["settled"]} settled: paid ${l["paid"]:.2f}, fees ${l["fees"]:.2f}, profit ${l["pnl"]:+.2f}; '
+                  f'simulated fill agreed with the exchange on {l["simulated_fill_agrees"]} of {l["orders"]}')
     return table
 
 
@@ -335,11 +419,20 @@ def main():
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--every", type=int, default=20, help="seconds between passes")
     parser.add_argument("--dir", default=str(OUT), help="where state and the journal are kept")
+    parser.add_argument("--live", action="store_true", help="also place real orders on the production account")
+    parser.add_argument("--contracts", type=int, default=5, help="contracts per live order")
+    parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
+    parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
     args = parser.parse_args()
     if args.command == "report":
         report(args.dir)
         return
-    trader, stop, passes = Trader(Api(), args.dir), time.time()+args.hours*3600, 0
+    broker = None
+    if args.live:
+        broker = Broker(args.contracts, args.max_exposure, args.max_loss)
+        print(f"LIVE: real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
+              f"an order, at most ${args.max_exposure:.0f} unsettled, stop after ${args.max_loss:.0f} lost", flush=True)
+    trader, stop, passes = Trader(Api(), args.dir, broker), time.time()+args.hours*3600, 0
     while time.time() < stop:
         began = time.time()
         try:

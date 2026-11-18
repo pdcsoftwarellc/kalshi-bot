@@ -89,10 +89,18 @@ By default (`python bot.py`) the bot simulates fills in `TradingBot._execute_sig
 `paper/` simulates the two rules that survived the [fourth research round](research/parallel-round4.md):
 an 80¢ resting bid on tennis favourites priced 90¢ or more before play, and buying the NBA
 leader at 97–99¢ in the fourth quarter or overtime (at the ask, and with a bid 1¢ below it).
-It uses public Kalshi reads only, holds no credentials and cannot place an order.
+Without `--live` it uses public Kalshi reads only and cannot place an order.
+
+With `--live` each simulated order on a supported tour is also sent to the production
+account as a real order (`paper/broker.py`): the tennis bid rests until the market closes,
+and the NBA buy is immediate-or-cancel at the ask. New live orders stop when unsettled
+exposure would pass `--max-exposure`, when settled losses reach `--max-loss`, or while a
+file named `STOP` exists in `data/paper/`. Resting orders already on the exchange stay
+there until the match ends or they are cancelled by hand.
 
 ```sh
 .venv/bin/python -m paper.trader run --hours 24    # one pass every 20 seconds
+.venv/bin/python -m paper.trader run --hours 24 --live --contracts 5 --max-exposure 60 --max-loss 30
 .venv/bin/python -m paper.trader report
 ```
 

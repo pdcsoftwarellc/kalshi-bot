@@ -47,6 +47,21 @@ looked at: single cells are not corrected for that and are flagged in the report
 
     .venv/bin/python research/outside_lines.py download --minutes 9     (repeat until nothing is left)
     .venv/bin/python research/outside_lines.py report
+    .venv/bin/python research/outside_lines.py forward                  (frozen out-of-sample test; rerun weekly, or daily before the tips)
+
+`forward`: the one cell of 3a that looked good (men's 90-99c favourites whose OPENING-spread residual is at least
++2.65c: 63 of 63 won in the second half, one cell out of about 70 looked at) is tracked on games that started after
+the data above ended. Everything the rule needs is frozen in FROZEN below and nothing is refitted. Each run lists
+Kalshi's settled KXNCAAMBGAME markets closed since the freeze (public, unauthenticated, KALSHI_PACE seconds apart, long
+pauses on HTTP 429), reads the one-minute bars of the 25 minutes before each new game's start, prices the favourite as
+`report` does (median midpoint of the last 10-15 quotes ending two minutes before the start, spread at most 4c, range
+at most 3c; start = expected expiration minus three hours), reads ESPN's opening spread, applies the rule and appends
+to data/processed/outside-lines/forward.json. Games already in that file are not read again. One difference from
+`report`: its rows also required a clean quote three hours before the game (research/favourite_contexts.py); `forward`
+looks only at the quotes before the tip, as a live rule would.
+Look-ahead guard: ESPN's archive gives the opening spread without the time it was posted. So every run also saves the
+opening spread ESPN's scoreboard shows for games that have NOT started yet (today and tomorrow), with the time seen; a
+kept game is later marked "seen before the tip" only when such a snapshot exists. Run it before the tips for that.
 """
 import argparse
 from collections import Counter, defaultdict
@@ -643,12 +658,289 @@ def report():
     (OUT/"unmatched.json").write_text(json.dumps(missed, indent=0))
 
 
+# ---------------------------------------------------------------- forward test of one frozen cell
+
+# Frozen on 2026-11-19 from the `report` run of that day (data/processed/outside-lines/summary.json and matched.json).
+# Nothing below is refitted by `forward`.
+FROZEN = dict(
+    sigma=11.238753316082297,             # men: sd of (favourite's margin - closing spread), first half of matched games (n 443)
+    fit=(0.013672833023704846, -1.4293244733263775, 105.46718767747727),   # np.polyfit(mid, p_open, 2) on the first half of men's
+                                          # 80-99c games with an opening spread (443 games, 2025-11-03..2026-02-28); highest power first
+    threshold=2.6537621638760527,         # residual cut: 80th percentile of the first half of men's 90-99c games (n 257), the
+                                          # keep-above rule `report` picked ("men open residual" in section 3a)
+    freeze=1794974400,                    # latest men's game start in matched.json (2026-11-18 04:00 UTC); only later starts count
+)
+SERIES, KALSHI_PACE = "KXNCAAMBGAME", 2.5
+FORWARD = OUT/"forward.json"
+kalshi_last = [0.0]
+
+
+def kalshi(client, path, params):
+    """A public, unauthenticated Kalshi read, KALSHI_PACE seconds after the last one, long pauses after HTTP 429."""
+    import config
+    for pause in (30, 60, 120, 240):
+        wait = kalshi_last[0]+KALSHI_PACE-time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            resp = client.get(config.KALSHI_PROD_BASE+path, params=params)
+        except httpx.RequestError:
+            resp = None
+        kalshi_last[0] = time.monotonic()
+        if resp is not None and resp.status_code == 200:
+            return resp.json()
+        if resp is not None and resp.status_code != 429 and resp.status_code < 500:
+            raise RuntimeError(f"{path} returned HTTP {resp.status_code}")
+        print(f"   Kalshi throttled ({resp.status_code if resp is not None else 'network'}): pausing {pause}s", flush=True)
+        time.sleep(pause)
+    raise RuntimeError(f"Kalshi read failed after long back-off: {path}")
+
+
+def stamp(text):
+    return None if not text else int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
+
+
+def settled_events(client):
+    """Settled two-outcome games of the series closed since the freeze: event -> dict(start, settle, markets)."""
+    group, cursor = defaultdict(list), ""
+    while True:
+        params = dict(series_ticker=SERIES, status="settled", min_close_ts=FROZEN["freeze"], limit=1000)
+        if cursor:
+            params["cursor"] = cursor
+        data = kalshi(client, "/markets", params)
+        for m in data.get("markets") or []:
+            group[m["event_ticker"]].append(m)
+        cursor = data.get("cursor")
+        if not cursor or not data.get("markets"):
+            break
+    out = {}
+    for event, ms in group.items():
+        ms.sort(key=lambda m: m["ticker"])
+        try:
+            values = [float(m["settlement_value_dollars"]) for m in ms]
+        except (KeyError, TypeError, ValueError):
+            continue
+        expected = stamp(ms[0].get("expected_expiration_time"))
+        if len(ms) != 2 or any(v not in (0.0, 1.0) for v in values) or not expected or expected-3*3600 <= FROZEN["freeze"]:
+            continue
+        out[event] = dict(start=expected-3*3600, settle=stamp(ms[0].get("settlement_ts")), markets=ms, outcome=values[0])
+    return out
+
+
+def tip_quote(bars, start):
+    """(midpoint of the YES side, mean spread) from the last 10-15 one-minute quotes ending two minutes before the start, as
+    research/favourite_contexts.py `study` does; None when there is no clean quote."""
+    from research.near_end import cents
+    late = []
+    for b in sorted(bars, key=lambda b: b["end_period_ts"]):
+        if b["end_period_ts"] <= start-120:
+            bid, ask = cents(b, "yes_bid", "close"), cents(b, "yes_ask", "close")
+            late.append(None if bid is None or ask is None or not 0 < bid <= ask < 100 else (bid, ask))
+    late = late[-15:]
+    if len(late) < 10 or not all(q and q[1]-q[0] <= 4 for q in late):
+        return None
+    mids = [(q[0]+q[1])/2 for q in late]
+    if max(mids)-min(mids) > 3:
+        return None
+    return float(np.median(mids)), float(np.mean([q[1]-q[0] for q in late]))
+
+
+def board_final(events):
+    return bool(events) and all(e["status"].startswith(("STATUS_FINAL", "STATUS_POSTPONED", "STATUS_CANCELED", "STATUS_FORFEIT")) for e in events)
+
+
+def binomial_tail(n, wins, p):
+    """P(at least `wins` wins in n) when each wins with probability p."""
+    return float(sum(math.comb(n, k)*p**k*(1-p)**(n-k) for k in range(wins, n+1)))
+
+
+def side_text(rows):
+    if not rows:
+        return "n   0"
+    cost = float(np.mean([r["ask"]+fee(r["ask"]) for r in rows]))
+    net = float(np.mean([100*r["payout"]-r["ask"]-fee(r["ask"]) for r in rows]))
+    return (f"n {len(rows):3d} won {sum(r['payout'] == 1.0 for r in rows):3d} lost {sum(r['payout'] != 1.0 for r in rows):2d} "
+            f"mean ask {np.mean([r['ask'] for r in rows]):5.2f}c return {100*net/cost:+6.2f}% ({net:+.2f}c a bet, taker fee paid)")
+
+
+def forward(minutes):
+    deadline = time.monotonic()+60*minutes
+    OUT.mkdir(parents=True, exist_ok=True)
+    state = json.loads(FORWARD.read_text()) if FORWARD.exists() else dict(frozen=json.loads(json.dumps(FROZEN)), games={}, snapshots={})
+    if state.get("frozen") != json.loads(json.dumps(FROZEN)):
+        raise SystemExit("forward.json was built with different frozen constants; move it aside rather than mixing rules")
+    games, snaps = state["games"], state["snapshots"]
+    now = datetime.now(timezone.utc)
+    count = Counter()
+
+    def save():
+        temp = FORWARD.with_suffix(".tmp")
+        temp.write_text(json.dumps(state, indent=0))
+        temp.replace(FORWARD)
+
+    with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True) as client:
+        # 1. look-ahead guard: what ESPN shows NOW for games that have not started
+        for offset in (0, 1):
+            day = (now.astimezone(EASTERN)+timedelta(days=offset)).strftime("%Y%m%d")
+            data = fetch(client, f"{SITE}/{LEAGUES['men']}/scoreboard", dict(dates=day, groups=50, limit=500))
+            for e in (data or {}).get("events") or []:
+                c = e["competitions"][0]
+                odds = (c.get("odds") or [None])[0]
+                if e["status"]["type"]["name"] != "STATUS_SCHEDULED" or stamp(e["date"]) <= now.timestamp() or not odds or e["id"] in snaps:
+                    continue
+                home = ((odds.get("pointSpread") or {}).get("home") or {})
+                opened, current = (home.get("open") or {}).get("line"), (home.get("close") or {}).get("line")
+                if opened is None and current is None:
+                    continue
+                snaps[e["id"]] = dict(seen_at=now.isoformat(timespec="seconds"), tip=e["date"], home_open=opened, home_current=current,
+                                      provider=(odds.get("provider") or {}).get("name"))
+                count["pre-tip snapshots saved"] += 1
+        save()
+
+        # 2. new settled Kalshi games since the freeze
+        with httpx.Client(timeout=30, headers={"User-Agent": HEADERS["User-Agent"]}) as kc:
+            events = settled_events(kc)
+            new = {k: v for k, v in events.items() if k not in games}
+            count["settled Kalshi games after the freeze"] = len(events)
+            count["new this run"] = len(new)
+            by_start = defaultdict(list)
+            for event, e in new.items():
+                by_start[e["start"]].append(event)
+            for start, names in sorted(by_start.items()):
+                for i in range(0, len(names), 100):
+                    if time.monotonic() > deadline:
+                        break
+                    part = names[i:i+100]
+                    tickers = {new[k]["markets"][0]["ticker"]: k for k in part}
+                    data = kalshi(kc, "/markets/candlesticks", dict(market_tickers=",".join(tickers), start_ts=start-25*60, end_ts=start, period_interval=1))
+                    got = {x["market_ticker"]: x.get("candlesticks") or [] for x in data.get("markets") or []}
+                    for ticker, event in tickers.items():
+                        e, bars = new[event], got.get(ticker, [])
+                        raw = RAW/"kalshi-forward"/f"{event}.json"
+                        raw.parent.mkdir(parents=True, exist_ok=True)
+                        raw.write_text(json.dumps(dict(ticker=ticker, start=start, candlesticks=bars)))
+                        a, b = e["markets"]
+                        row = dict(event=event, league="men", start=start, settle=e["settle"],
+                                   day=(datetime.fromtimestamp(start, EASTERN)-timedelta(hours=5)).strftime("%Y-%m-%d"), status="no clean quote before the tip")
+                        q = tip_quote(bars, start)
+                        if q:
+                            yes = q[0] > 50
+                            fav, other = (a, b) if yes else (b, a)
+                            code = fav["ticker"].rsplit("-", 1)[-1]
+                            row.update(mid=q[0] if yes else 100-q[0], spread=q[1], payout=e["outcome"] if yes else 1-e["outcome"],
+                                       fav=fav.get("yes_sub_title") or "", opp=other.get("yes_sub_title") or "", fav_code=code,
+                                       opp_code=other["ticker"].rsplit("-", 1)[-1], status="priced")
+                            row["ask"] = row["mid"]+row["spread"]/2
+                        games[event] = row
+                    save()
+
+        # 3. ESPN opening spread for the priced 90-99c favourites not yet judged
+        todo = [g for g in games.values() if g["status"] == "priced" and 90 <= g["mid"] < 99 and "kept" not in g]
+        boards_now = defaultdict(dict)
+        for league, day in board_days(todo):
+            f = board_file(league, day)
+            events_of_day = json.loads(f.read_text()) if f.exists() else None
+            if events_of_day is None or not board_final(events_of_day):
+                data = fetch(client, f"{SITE}/{LEAGUES[league]}/scoreboard", dict(dates=day, groups=50, limit=500))
+                if data is None or "events" not in data:
+                    continue
+                events_of_day = slim(data)
+                if board_final(events_of_day):
+                    f.parent.mkdir(parents=True, exist_ok=True)
+                    f.write_text(json.dumps(events_of_day))
+            for e in events_of_day:
+                boards_now[league][e["id"]] = e
+        pairs, _ = match(todo, boards_now)
+        for g in todo:
+            if time.monotonic() > deadline:
+                break
+            e = pairs.get(g["event"])
+            if e is None or not e["status"].startswith("STATUS_FINAL"):
+                g["note"] = "no ESPN game matched yet"
+                continue
+            f = detail_file("men", "odds", e["id"])
+            if not f.exists():
+                data = fetch(client, f"{CORE}/{LEAGUES['men']}/events/{e['id']}/competitions/{e['id']}/odds")
+                if data is None:
+                    continue
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(json.dumps(data))
+            x = lines(g, e)
+            fav = e["teams"][1] if e["flip"] else e["teams"][0]
+            g.update(espn=e["id"], espn_tip=e["date"], espn_won=fav.get("winner"), provider=x["provider"], open=x["open"], close=x["close"],
+                     fav_home=fav["home"], judged_at=now.isoformat(timespec="seconds"))
+            g.pop("note", None)
+            if x["open"] is None:
+                g.update(kept=None, residual=None, p_open=None)
+            else:
+                g["p_open"] = 100*phi(x["open"]/FROZEN["sigma"])
+                g["residual"] = float(g["p_open"]-np.polyval(FROZEN["fit"], g["mid"]))
+                g["kept"] = bool(g["residual"] >= FROZEN["threshold"])
+            snap = snaps.get(e["id"])
+            if snap and snap["home_open"] is not None and stamp(snap["seen_at"]) < stamp(e["date"]):
+                try:
+                    line = float(snap["home_open"])
+                except ValueError:      # "PK" / "EVEN"
+                    line = 0.0
+                seen = -line if fav["home"] else line
+                g["open_seen_before_tip"] = dict(seen_at=snap["seen_at"], hours_before=round((stamp(e["date"])-stamp(snap["seen_at"]))/3600, 1),
+                                                 open_then=seen, same_as_archive=x["open"] is not None and abs(seen-x["open"]) < 0.01)
+            else:
+                g["open_seen_before_tip"] = None
+            save()
+        save()
+
+    # ---- output (everything recorded so far, not just this run)
+    done = [g for g in games.values() if g["status"] == "priced" and 90 <= g["mid"] < 99]
+    judged = sorted((g for g in done if "kept" in g), key=lambda g: (g["start"], g["event"]))
+    kept, dropped, no_line = [g for g in judged if g["kept"]], [g for g in judged if g["kept"] is False], [g for g in judged if g["kept"] is None]
+    print("FORWARD TEST, frozen rule: men's college basketball favourites at 90-99c before the tip whose opening-spread residual is at least the threshold")
+    print(f"  frozen constants: sigma {FROZEN['sigma']}, quadratic {FROZEN['fit']}, residual threshold {FROZEN['threshold']}, "
+          f"games starting after {datetime.fromtimestamp(FROZEN['freeze'], timezone.utc):%Y-%m-%d %H:%M} UTC")
+    print(f"  residual = 100 x Phi(opening spread / sigma) - (a x mid^2 + b x mid + c); kept when residual >= threshold")
+    print(f"  this run: {dict(count)}")
+    print(f"  recorded so far: Kalshi games {len(games)} ({Counter(g['status'] for g in games.values()).most_common()}); 90-99c favourites {len(done)}; "
+          f"judged {len(judged)}; waiting for an ESPN match or line read {len(done)-len(judged)}; pre-tip snapshots on file {len(snaps)}")
+    if judged:
+        print(f"  span of judged games: {judged[0]['day']} .. {judged[-1]['day']}")
+    print(f"  KEPT     {side_text(kept)}")
+    print(f"  DROPPED  {side_text(dropped)}")
+    print(f"  NO OPENING SPREAD (not in the test) {side_text(no_line)}")
+    history = [r for r in json.loads((OUT/'matched.json').read_text()) if r["league"] == "men" and 90 <= r["mid"] < 99 and r.get("p_open") is not None
+               and r["p_open"]-np.polyval(FROZEN["fit"], r["mid"]) >= FROZEN["threshold"]] if (OUT/"matched.json").exists() else []
+    for label, rows in (("forward kept bets", kept), ("the rule's historical bets (price only; outcomes not used)", history)):
+        if not rows:
+            continue
+        even = float(np.mean([r["ask"]+fee(r["ask"]) for r in rows]))/100
+        need = math.ceil(math.log(0.05)/math.log(even))
+        text = f"  break-even win rate at the mean ask plus fee of {label}: {100*even:.2f}% -> {need} kept bets in a row with no loss for a one-sided p < 0.05"
+        with_one = next(n for n in range(need, 2000) if binomial_tail(n, n-1, even) < 0.05)
+        print(text+f"; with one loss, {with_one} bets")
+    if kept:
+        even = float(np.mean([r["ask"]+fee(r["ask"]) for r in kept]))/100
+        wins = sum(r["payout"] == 1.0 for r in kept)
+        print(f"  one-sided binomial p-value, kept: P(at least {wins} wins in {len(kept)} | break-even {100*even:.2f}%) = {binomial_tail(len(kept), wins, even):.3f}")
+    seen = sum(bool(g.get("open_seen_before_tip")) for g in kept)
+    print(f"  look-ahead guard: {seen} of {len(kept)} kept games had their opening spread saved from ESPN's scoreboard BEFORE the tip. For the others it cannot be told:"
+          " ESPN's archive gives the opening spread with no time stamp. Run this command before the day's tips to record it.")
+    print(f"  kept games ({len(kept)}):")
+    print(f"    {'date':10s} {'favourite':24s} {'opponent':24s} {'ask':>5s} {'open':>6s} {'resid':>6s} {'result':6s} open seen before the tip?")
+    for g in kept:
+        s = g.get("open_seen_before_tip")
+        guard = f"yes, {s['hours_before']}h before ({s['open_then']:+.1f}{'' if s['same_as_archive'] else ', DIFFERS from the archive'})" if s else "cannot tell (no pre-tip snapshot)"
+        print(f"    {g['day']:10s} {g['fav'][:24]:24s} {g['opp'][:24]:24s} {g['ask']:5.1f} {-g['open']:+6.1f} {g['residual']:+6.2f} {'won' if g['payout'] == 1.0 else 'LOST':6s} {guard}")
+    lost = [g for g in dropped if g["payout"] != 1.0]
+    if lost:
+        print("  dropped games that lost: "+"; ".join(f"{g['day']} {g['fav']} ask {g['ask']:.1f} open {-g['open']:+.1f} resid {g['residual']:+.2f}" for g in lost))
+    print(f"  saved {FORWARD}")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("download", "report"))
+    parser.add_argument("command", choices=("download", "report", "forward"))
     parser.add_argument("--minutes", type=float, default=9)
     args = parser.parse_args()
-    download(args.minutes) if args.command == "download" else report()
+    {"download": lambda: download(args.minutes), "report": report, "forward": lambda: forward(args.minutes)}[args.command]()
 
 
 if __name__ == "__main__":

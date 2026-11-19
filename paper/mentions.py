@@ -2,8 +2,11 @@
 
 research/hype_no.py found that takers in these markets mostly buy YES and that
 a NO bid resting one cent inside the spread earned about +4c per fill over two
-months, while the same order on the YES side lost. An older holdout was too
-small to confirm it. This program collects forward evidence, on paper only.
+months, while the same order on the YES side lost. research/resting_no.py then
+confirmed it on January-September 2026 with this program's own rule (+6.5c per
+fill, 995 fills in 233 events), outside sports broadcasts, mostly for words
+priced 20-80c in books 10c or wider, and fading in the latest weeks. This
+program collects forward evidence, on paper only.
 
 Kalshi gives no start time for a speech, but most event tickers carry its
 date (KXEARNINGSMENTIONKR-26DEC03). So for every open mention market whose
@@ -110,6 +113,7 @@ class Mentions:
         for rule, side, bid in (("mention_no", "no", no+1), ("mention_mirror", "yes", yes+1)):
             self.state["orders"].append(dict(id=len(self.state["orders"])+1, rule=rule, family=family(ticker), ticker=ticker,
                                              event=item["event"], day=item["day"], side=side, price=bid, spread=100-yes-no,
+                                             yes_mid=(yes+100-no)/2,
                                              placed=now, seen=now, polled=now, checked=0, status="open", size_through=0.0))
         self.done.add(ticker)
         del self.state["queue"][ticker]
@@ -175,7 +179,14 @@ def summary(orders):
     groups = defaultdict(list)
     for o in orders:
         groups[(o["family"], o["rule"])].append(o)
-        groups[("all families", o["rule"])].append(o)
+        if o["family"] == "sports broadcasts":         # lost in the holdout: YES was underpriced there
+            continue
+        groups[("all non-sports", o["rule"])].append(o)
+        # Where the edge sat in both research periods: mid-priced words and wide books.
+        if 20 <= o.get("yes_mid", 50) <= 80:
+            groups[("non-sports, YES 20-80c", o["rule"])].append(o)
+        if o["spread"] >= 10:
+            groups[("non-sports, spread 10c+", o["rule"])].append(o)
     out = {}
     for (name, rule), rows in sorted(groups.items()):
         done = [o for o in rows if o["status"] in ("settled", "expired")]

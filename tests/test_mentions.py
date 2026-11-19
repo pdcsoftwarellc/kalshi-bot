@@ -53,7 +53,8 @@ def test_mention_market_from_quote_to_settlement(tmp_path):
     book.step(T0+2000)                               # settlement check, which also reads the last prints
     assert (no["status"], no["net"], mirror["status"]) == ("settled", 47, "expired")
     table = summary(book.state["orders"])
-    assert table["all families | mention_no"]["fills"] == 1 and table["all families | mention_mirror"]["fills"] == 0
+    assert table["all non-sports | mention_no"]["fills"] == 1 and table["all non-sports | mention_mirror"]["fills"] == 0
+    assert "non-sports, YES 20-80c | mention_no" in table and "non-sports, spread 10c+ | mention_no" not in table
 
 
 def test_tight_or_one_sided_books_are_retried_then_dropped(tmp_path):

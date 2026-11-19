@@ -98,7 +98,9 @@ place an order.
 | Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
 | NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |
 | College basketball dip | The three tennis dip bids on men's college games | The 80¢ bid only |
-| Women's college and NBA dips | The same three bids on women's college games and NBA pre-game favourites | No |
+| Women's college basketball dip | The same three bids on women's college games | The 80¢ bid only |
+| NBA and college volleyball dips | The same three bids on NBA pre-game favourites and women's college volleyball | No |
+| College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | No |
 | Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | No |
 
 Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and
@@ -120,10 +122,13 @@ already on the exchange stay there until the match ends or they are cancelled by
 - State and a journal are kept in `data/paper/`, so a restart resumes. A match that starts
   while the trader is not running is skipped, because its pre-match price was not observed.
 - Run only one copy against a state folder.
-- `paper/mentions.py` is a separate paper-only program for "mention" markets (will the speaker
-  say X?). It rests a simulated NO bid one cent inside the spread on markets whose event is
-  dated today or tomorrow, with the same bid on the YES side as a control, and reports both:
-  `.venv/bin/python -m paper.mentions run --hours 336` and `... report`.
+- `paper/mentions.py` is a separate program for "mention" markets (will the speaker say X?).
+  It rests a simulated NO bid one cent inside the spread on markets whose event is dated
+  today or tomorrow, with the same bid on the YES side as a control, and reports both:
+  `.venv/bin/python -m paper.mentions run --hours 336` and `... report`. With `--live` the
+  NO bid is also a real post-only order when the market is not a sports broadcast and YES is
+  priced 20–80¢, for at most five words per event (`--contracts 3 --max-exposure 25
+  --max-loss 15` by default). The `STOP` file stops it too.
 - `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
   mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both

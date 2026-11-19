@@ -15,20 +15,23 @@ few markets with an order) the order book and the trade record.
                    97-99c: buy at the ask, limited to the size displayed there
   nba rest         the same signal, a bid 1c below the ask instead
   cbb dip (...)    men's college basketball, the same three dip bids as tennis
-  wcbb / nba dip   the same on women's college basketball and NBA pre-game favourites
+  wcbb dip (...)   women's college basketball, the same three dip bids
+  nba / vball dip  the same on NBA pre-game favourites and women's college volleyball
+  cbb underdog     men's college basketball underdog priced 35-50c: buy at the ask
+                   within ten minutes of the scheduled start
   basket prematch  the nightly basket: buy every 90c+ basketball favourite at the
                    ask within ten minutes of the scheduled start
 
 Tiers. "validated" rows are the ones the research supports: first-round
-qualifying matches on every tennis tour, men's college basketball, and NBA
-leads of 6+. "later-qualifying" and "main-draw" are the other rounds on WTA
+qualifying matches on every tennis tour, men's and women's college basketball,
+and NBA leads of 6+. "later-qualifying" and "main-draw" are the other rounds on WTA
 and ATP Challenger. "simulated" marks families that are never sent live
-(women's college basketball, NBA dips). Basket rows carry the family as tier. "shadow" is everything the research did not support or
+(NBA dips, college volleyball, college basketball underdogs). Basket rows carry the family as tier. "shadow" is everything the research did not support or
 did not test: other rounds on ATP main tour and WTA Challenger, NBA leads
 under 6.
 
 With `--live`, a validated row of a rule named in --live-rules (default: the
-80c dip bid in tennis and college basketball) is also sent to the production
+80c dip bid in tennis and men's and women's college basketball) is also sent to the production
 Kalshi account as a real order
 (real money). Everything else stays simulated. New live orders stop when open
 exposure would pass --max-exposure, when settled live losses reach --max-loss,
@@ -64,7 +67,10 @@ OUT = ROOT / "data/paper"
 DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis", "validated"),
         "KXATPMATCH": ("tennis", "shadow"), "KXWTACHALLENGERMATCH": ("tennis", "shadow"),
         "KXNCAAMBGAME": ("cbb", "validated"),
-        "KXNCAAWBGAME": ("wcbb", "simulated"), "KXNBAGAME": ("nba", "simulated")}
+        "KXNCAAWBGAME": ("wcbb", "validated"), "KXNBAGAME": ("nba", "simulated"),
+        "KXNCAAWVMATCH": ("vball", "simulated")}
+LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip")       # sent as real orders unless --live-rules says otherwise
+UNDERDOG = (35, 50)                           # men's college basketball underdogs bought on paper before the start
 NBA = "KXNBAGAME"
 BASKET, BASKET_LEAD = ("cbb", "wcbb", "nba"), 600     # families bought before the start, and how long before
 SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL, HORIZON = 300, 8, 600, 60, 12*3600
@@ -307,6 +313,8 @@ class Trader:
             if event not in self.starts or now < self.starts[event]-BASKET_LEAD:
                 return
             rule, tier = "basket_prematch", prefix
+            if prefix == "cbb":
+                self.underdog(event, m, now)
         else:
             return
         pick = rules.favourite(self.state["watch"][event])
@@ -329,6 +337,24 @@ class Trader:
                        price=book["ask"], start=pick[1], band=band,
                        **(dict(round="qualifying") if prefix == "tennis" else {}))
         o.update(status="filled", filled_at=now, size=book["ask_size"])
+
+    def underdog(self, event, m, now):
+        """Simulated only: buy a men's college basketball underdog priced 35-50c at the ask, just before the start.
+
+        research/college_sports.py saw these win more often than their price, but not by enough to pass.
+        """
+        key, quotes = event+":dog", self.state["watch"][event][-rules.KEEP_QUOTES:]
+        if key in self.handled or len(quotes) < rules.MIN_QUOTES:
+            return
+        mid = median(q[1] for q in quotes)
+        side, price = ("yes", mid) if mid <= 50 else ("no", 100-mid)
+        if UNDERDOG[0] <= price <= UNDERDOG[1]:
+            book = rules.top(self.api.get(f'/markets/{m["ticker"]}/orderbook'))[side]
+            if book["ask"] is not None and book["ask"] <= price+2:
+                o = self.order(now, rule="cbb_underdog", tier="simulated", kind="take", event=event, ticker=m["ticker"],
+                               side=side, price=book["ask"], start=price)
+                o.update(status="filled", filled_at=now, size=book["ask_size"])
+        self.handled.add(key)
 
     def nba(self, markets, live, now):
         for event, m in markets.items():
@@ -496,9 +522,10 @@ def gaps(orders):
     """
     weeks = defaultdict(list)
     for o in orders:
-        if o["rule"] not in ("tennis_dip", "cbb_dip") or "payout" not in o:
+        if o["rule"] not in ("tennis_dip", "cbb_dip", "wcbb_dip") or "payout" not in o:
             continue
-        group = ("college basketball" if o["rule"] == "cbb_dip" else
+        group = ("men's college basketball" if o["rule"] == "cbb_dip" else
+                 "women's college basketball" if o["rule"] == "wcbb_dip" else
                  "tennis, first-round qualifying" if str(o.get("round", "")).startswith("qualifying, first") else "tennis, other rounds")
         week = datetime.fromtimestamp(o["placed"], timezone.utc).strftime("%G-W%V")
         for key in ((group, week), (group, "all weeks")):
@@ -551,8 +578,7 @@ def main():
     parser.add_argument("--contracts", type=int, default=3, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
-    parser.add_argument("--live-rules", nargs="+", choices=("tennis_dip", "cbb_dip", "nba_take"),
-                        default=["tennis_dip", "cbb_dip"],
+    parser.add_argument("--live-rules", nargs="+", choices=(*LIVE_RULES, "nba_take"), default=list(LIVE_RULES),
                         help="rules allowed to place real orders; everything else is simulated")
     args = parser.parse_args()
     if args.command == "report":

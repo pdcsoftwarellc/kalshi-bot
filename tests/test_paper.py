@@ -356,7 +356,43 @@ def test_basket_buys_a_basketball_favourite_just_before_the_start(tmp_path):
     api.states[event] = dict(status="inprogress", period=1, home_points=0, away_points=0)
     trader.step(T0+1010)
     assert [(o["rule"], o["tier"]) for o in trader.state["orders"]][1:] == \
-        [("wcbb_dip", "simulated"), ("wcbb_dip_rel", "simulated"), ("wcbb_dip_deep", "simulated")]
+        [("wcbb_dip", "validated"), ("wcbb_dip_rel", "validated"), ("wcbb_dip_deep", "validated")]
+    assert not broker.sent                                       # this broker was not given the women's rule
+
+
+def test_womens_college_basketball_sends_the_80c_bid_and_volleyball_stays_simulated(tmp_path):
+    api, broker = FakeApi(), FakeBroker()
+    broker.rules = ("tennis_dip", "cbb_dip", "wcbb_dip")
+    tickers = ["KXNCAAWBGAME-26NOV18UCONNLSU-UCONN", "KXNCAAWVMATCH-26NOV18NEBWIS-NEB"]
+    for ticker in tickers:
+        api.listing[ticker] = market(ticker, 93, 94)
+        api.states[ticker.rsplit("-", 1)[0]] = dict(status="scheduled")
+        api.books[ticker] = book(92, 94)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    for ticker in tickers:
+        api.states[ticker.rsplit("-", 1)[0]] = dict(status="inprogress", period=1, home_points=2, away_points=0)
+    trader.step(T0+260)
+    assert {(o["rule"], o["tier"]) for o in trader.state["orders"]} >= {("wcbb_dip", "validated"), ("vball_dip", "simulated")}
+    assert broker.sent == [(tickers[0], "yes", 80, 5, True)]
+
+
+def test_mild_college_basketball_underdog_is_bought_on_paper_before_the_start(tmp_path):
+    event, ticker = "KXNCAAMBGAME-26NOV18DUKEUNC", "KXNCAAMBGAME-26NOV18DUKEUNC-DUKE"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = market(ticker, 56, 58)                 # the other team is the underdog: NO at about 43c
+    api.books[ticker] = book(56, 58, 200)
+    api.states[event] = dict(status="scheduled")
+    api.start[event] = iso(T0+1000)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    assert not trader.state["orders"]                            # more than ten minutes before the start
+    trader.step(T0+500)
+    trader.step(T0+520)
+    (dog,) = trader.state["orders"]                              # once, and never a real order
+    assert (dog["rule"], dog["tier"], dog["side"], dog["price"], dog["status"]) == ("cbb_underdog", "simulated", "no", 44, "filled")
     assert not broker.sent
 
 

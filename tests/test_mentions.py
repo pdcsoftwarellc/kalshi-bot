@@ -66,3 +66,46 @@ def test_tight_or_one_sided_books_are_retried_then_dropped(tmp_path):
     for i in range(3):
         book.step(T0+4*i)
     assert not book.state["orders"] and book.state["queue"][ticker]["looks"] == 1
+
+
+class FakeBroker:
+    contracts, max_exposure, max_loss = 3, 4, 15
+
+    def __init__(self):
+        self.sent, self.filled = [], 0
+
+    def buy(self, ticker, side, price, count, rest, post_only=False):
+        self.sent.append((ticker, side, price, count, rest, post_only))
+        return dict(order_id=f"o{len(self.sent)}", fill_count="0")
+
+    def order(self, order_id):
+        return dict(status="executed", filled=self.filled, remaining=0, cost=self.filled*.53, fees=0)
+
+
+def test_live_sends_only_the_no_bid_within_the_limits(tmp_path):
+    event = "KXEARNINGSMENTIONKR-26DEC03"
+    api, broker = FakeApi(), FakeBroker()
+    api.markets = [dict(ticker=f"{event}-{word}", event_ticker=event) for word in ("A", "B", "C")]
+    api.book = dict(orderbook_fp=dict(yes_dollars=[["0.4000", "50"]], no_dollars=[["0.5200", "80"]]))
+    book = Mentions(api, tmp_path, broker)
+    for i in range(5):
+        book.step(T0+4*i)
+    # 3 contracts at 53c is $1.59 an order: two fit under the $4 limit, the third does not. The mirror is never sent.
+    assert broker.sent == [(f"{event}-A", "no", 53, 3, True, True), (f"{event}-B", "no", 53, 3, True, True)]
+    first = book.state["orders"][0]
+
+    broker.filled = 3
+    api.tape = [dict(created_time=iso(T0+100), yes_price_dollars="0.4800", no_price_dollars="0.5200", count_fp="25")]
+    api.settled = dict(status="finalized", settlement_value_dollars="0.0000", settlement_ts=iso(T0+5000))
+    book.step(T0+2000)
+    assert first["status"] == "settled" and abs(first["live"]["pnl"]-(3-1.59)) < 1e-9
+
+
+def test_live_skips_sports_broadcasts_and_extreme_prices(tmp_path):
+    api, broker = FakeApi(), FakeBroker()
+    api.markets = [dict(ticker="KXEARNINGSMENTIONKR-26DEC03-A", event_ticker="KXEARNINGSMENTIONKR-26DEC03")]
+    api.book = dict(orderbook_fp=dict(yes_dollars=[["0.0500", "50"]], no_dollars=[["0.8800", "80"]]))   # YES near 8c
+    book = Mentions(api, tmp_path, broker)
+    for i in range(3):
+        book.step(T0+4*i)
+    assert len(book.state["orders"]) == 2 and not broker.sent

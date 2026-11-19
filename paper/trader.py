@@ -15,11 +15,15 @@ few markets with an order) the order book and the trade record.
                    97-99c: buy at the ask, limited to the size displayed there
   nba rest         the same signal, a bid 1c below the ask instead
   cbb dip (...)    men's college basketball, the same three dip bids as tennis
+  wcbb / nba dip   the same on women's college basketball and NBA pre-game favourites
+  basket prematch  the nightly basket: buy every 90c+ basketball favourite at the
+                   ask within ten minutes of the scheduled start
 
 Tiers. "validated" rows are the ones the research supports: first-round
 qualifying matches on every tennis tour, men's college basketball, and NBA
 leads of 6+. "later-qualifying" and "main-draw" are the other rounds on WTA
-and ATP Challenger. "shadow" is everything the research did not support or
+and ATP Challenger. "simulated" marks families that are never sent live
+(women's college basketball, NBA dips). Basket rows carry the family as tier. "shadow" is everything the research did not support or
 did not test: other rounds on ATP main tour and WTA Challenger, NBA leads
 under 6.
 
@@ -59,8 +63,10 @@ OUT = ROOT / "data/paper"
 # Series that get dip bids: (rule prefix, tier). Only "validated" rows of a rule in --live-rules are sent live.
 DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis", "validated"),
         "KXATPMATCH": ("tennis", "shadow"), "KXWTACHALLENGERMATCH": ("tennis", "shadow"),
-        "KXNCAAMBGAME": ("cbb", "validated")}
+        "KXNCAAMBGAME": ("cbb", "validated"),
+        "KXNCAAWBGAME": ("wcbb", "simulated"), "KXNBAGAME": ("nba", "simulated")}
 NBA = "KXNBAGAME"
+BASKET, BASKET_LEAD = ("cbb", "wcbb", "nba"), 600     # families bought before the start, and how long before
 SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL, HORIZON = 300, 8, 600, 60, 12*3600
 CLIP = 100                                    # contracts per trade for the dollar figures
 
@@ -99,7 +105,7 @@ class Trader:
         file = self.out/"state.json"
         self.state = json.loads(file.read_text()) if file.exists() else dict(watch={}, handled=[], orders=[])
         self.handled = set(self.state["handled"])
-        self.known, self.refreshed, self.pairs, self.by_ticker = {}, 0.0, {}, {}
+        self.known, self.refreshed, self.pairs, self.by_ticker, self.starts = {}, 0.0, {}, {}, {}
 
     # ---- reads -------------------------------------------------------------------------------
 
@@ -112,6 +118,10 @@ class Trader:
                 for event in m.get("primary_event_tickers") or []:
                     if event.startswith((*DIPS, NBA)):
                         found[event] = m["id"]
+                        try:
+                            self.starts[event] = stamp(m["start_date"])
+                        except (KeyError, TypeError, ValueError, AttributeError):
+                            pass
             cursor = page.get("cursor")
             if not cursor or not page.get("milestones"):
                 return found
@@ -119,7 +129,7 @@ class Trader:
     def markets(self):
         """The alphabetically first open market of every event, as the research used."""
         events = defaultdict(list)
-        for series in (*DIPS, NBA):
+        for series in dict.fromkeys((*DIPS, NBA)):
             cursor = ""
             while True:
                 page = self.api.get("/markets", status="open", series_ticker=series, limit=1000, cursor=cursor)
@@ -281,12 +291,26 @@ class Trader:
                 self.order(now, rule="tennis_dip_85", price=rules.DIP_HIGH, **common)   # simulated only: fills more often
 
     def prematch(self, event, m, now):
-        """Simulated only: buy a qualifying-round tennis favourite at 90c+ before play, on the cheaper book."""
-        series, key = m["ticker"].split("-")[0], event+":pre"
-        if DIPS[series][0] != "tennis" or key in self.handled or rules.qualifying(m) != "first":
+        """Simulated only: buy a 90c+ favourite before play, on the cheaper of the two books.
+
+        Tennis: first-round qualifying, as soon as the favourite is established. Basketball (the nightly
+        basket): every game, within ten minutes of the scheduled start.
+        """
+        prefix, key = DIPS[m["ticker"].split("-")[0]][0], event+":pre"
+        if key in self.handled:
+            return
+        if prefix == "tennis":
+            if rules.qualifying(m) != "first":
+                return
+            rule, tier = "tennis_prematch", "validated"
+        elif prefix in BASKET:
+            if event not in self.starts or now < self.starts[event]-BASKET_LEAD:
+                return
+            rule, tier = "basket_prematch", prefix
+        else:
             return
         pick = rules.favourite(self.state["watch"][event])
-        if not pick:
+        if not pick or (prefix != "tennis" and pick[1] >= 99):
             return
         offers = [(m["ticker"], pick[0])]
         others = [x for x in self.pairs.get(event, []) if x["ticker"] != m["ticker"]]
@@ -298,13 +322,17 @@ class Trader:
         if not books:
             return
         book, ticker, side = min(books, key=lambda b: b[0]["ask"])
-        o = self.order(now, rule="tennis_prematch", tier="validated", kind="take", event=event, ticker=ticker,
-                       side=side, price=book["ask"], start=pick[1], round="qualifying")
+        if prefix != "tennis" and (book["ask"] >= 99 or book["ask"] > pick[1]+2):
+            return                                     # nothing sensible on offer
+        band = "90-93" if pick[1] < 93 else "93-96" if pick[1] < 96 else "96-99"
+        o = self.order(now, rule=rule, tier=tier, kind="take", event=event, ticker=ticker, side=side,
+                       price=book["ask"], start=pick[1], band=band,
+                       **(dict(round="qualifying") if prefix == "tennis" else {}))
         o.update(status="filled", filled_at=now, size=book["ask_size"])
 
     def nba(self, markets, live, now):
         for event, m in markets.items():
-            if not m["ticker"].startswith(NBA) or event in self.handled or event not in live:
+            if not m["ticker"].startswith(NBA) or event not in live:
                 continue
             side = rules.nba_leader(event, m["ticker"], live[event])
             if not side:
@@ -312,7 +340,7 @@ class Trader:
             # Small leads lost money in research: they are simulated once as "shadow" and never sent live,
             # and the game stays eligible for a real entry if the lead grows.
             small = abs(int(live[event]["home_points"])-int(live[event]["away_points"])) < rules.NBA_MIN_LEAD
-            key = event+":small" if small else event
+            key = event+(":small" if small else ":late")
             if key in self.handled:
                 continue
             try:                                       # the cached listing only decides whether a book read is worth it

@@ -61,11 +61,12 @@ class FakeApi:
     """Canned responses keyed by path; tests mutate the attributes between passes."""
 
     def __init__(self):
-        self.listing, self.states, self.books, self.tape, self.settled = {}, {}, {}, {}, {}
+        self.listing, self.states, self.books, self.tape, self.settled, self.start = {}, {}, {}, {}, {}, {}
 
     def get(self, path, **params):
         if path == "/milestones":
-            return dict(milestones=[dict(id=f"id-{e}", primary_event_tickers=[e]) for e in self.states])
+            return dict(milestones=[dict(id=f"id-{e}", primary_event_tickers=[e], start_date=self.start.get(e))
+                                    for e in self.states])
         if path == "/markets":
             return dict(markets=[m for m in self.listing.values() if m["ticker"].startswith(params["series_ticker"]+"-")])
         if path == "/live_data/batch":
@@ -334,3 +335,45 @@ def test_first_round_qualifying_is_real_on_a_shadow_tour(tmp_path):
     api.states[event] = dict(status="live")
     trader.step(T0+260)
     assert broker.sent == [(ticker, "yes", 80, 5, True)]
+
+
+def test_basket_buys_a_basketball_favourite_just_before_the_start(tmp_path):
+    event, ticker = "KXNCAAWBGAME-26NOV18UCONNLSU", "KXNCAAWBGAME-26NOV18UCONNLSU-LSU"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = market(ticker, 6, 8)                   # the listed team is the underdog: favourite is NO at 93c
+    api.books[ticker] = book(6, 8, 400)
+    api.states[event] = dict(status="scheduled")
+    api.start[event] = iso(T0+1000)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    assert not trader.state["orders"]                            # more than ten minutes before the start
+    trader.step(T0+500)
+    (buy,) = trader.state["orders"]
+    assert (buy["rule"], buy["tier"], buy["side"], buy["price"], buy["band"], buy["status"], buy["size"]) == \
+        ("basket_prematch", "wcbb", "no", 94, "93-96", "filled", 400)
+
+    api.states[event] = dict(status="inprogress", period=1, home_points=0, away_points=0)
+    trader.step(T0+1010)
+    assert [(o["rule"], o["tier"]) for o in trader.state["orders"]][1:] == \
+        [("wcbb_dip", "simulated"), ("wcbb_dip_rel", "simulated"), ("wcbb_dip_deep", "simulated")]
+    assert not broker.sent
+
+
+def test_nba_dip_and_late_rule_do_not_block_each_other(tmp_path):
+    event, ticker = "KXNBAGAME-26NOV17CHALAL", "KXNBAGAME-26NOV17CHALAL-CHA"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = market(ticker, 6, 8)
+    api.books[ticker] = book(6, 8, 500)
+    api.states[event] = dict(status="scheduled")
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="inprogress", period=1, home_points=2, away_points=0)
+    trader.step(T0+260)
+    assert [o["rule"] for o in trader.state["orders"]] == ["nba_dip", "nba_dip_rel", "nba_dip_deep"]
+    api.states[event] = dict(status="inprogress", period=4, home_points=100, away_points=80)
+    api.listing[ticker] = market(ticker, 2, 3)
+    api.books[ticker] = book(2, 3, 500)
+    trader.step(T0+280)
+    assert [o["rule"] for o in trader.state["orders"]][3:] == ["nba_take", "nba_rest"]

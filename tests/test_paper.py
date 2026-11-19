@@ -488,3 +488,19 @@ def test_live_stream_triggers_the_just_in_time_bid_between_passes(tmp_path):
     base = trader.state["orders"][0]
     assert base["near_by"] == "stream" and base["poll_near_at"] == T0+280 and len(broker.sent) == 2
     assert stream.watched == set()                               # nothing left to wait for
+
+
+def test_qualifying_favourite_just_under_ninety_gets_a_paper_bid_only(tmp_path):
+    event, ticker = "KXATPCHALLENGERMATCH-26NOV18AAABBB", "KXATPCHALLENGERMATCH-26NOV18AAABBB-AAA"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = dict(market(ticker, 86, 88), rules_primary="... Kobe Qualification Round 1 ...")
+    api.states[event] = dict(status="not_started")
+    api.books[ticker] = book(86, 88)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="live")
+    trader.step(T0+260)
+    (order,) = trader.state["orders"]
+    assert (order["rule"], order["tier"], order["price"], order["start"]) == ("tennis_dip_low", "simulated", 80, 87.0)
+    assert not broker.sent

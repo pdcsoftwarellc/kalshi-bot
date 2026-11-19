@@ -15,7 +15,7 @@ PRE = {"not_started", "scheduled"}
 DIP_LIVE = {"live", "inprogress"}
 DONE = {"closed", "ended", "complete", "finished", "final", "cancelled", "canceled"}
 
-DIP_START, DIP_BID, DIP_RELATIVE, DIP_DEEP, DIP_HIGH = 90, 80, 10, 65, 85
+DIP_START, DIP_BID, DIP_RELATIVE, DIP_DEEP, DIP_HIGH, DIP_LOW = 90, 80, 10, 65, 85, 85
 MIN_QUOTES, KEEP_QUOTES, MIN_SPAN, MAX_SPREAD, MAX_RANGE = 10, 15, 180, 4, 3
 NBA_BAND, NBA_MIN_LEAD = (97, 99), 6
 
@@ -57,8 +57,8 @@ def listed(market):
     return (bid, ask) if 0 < bid <= ask < 100 and ask-bid <= MAX_SPREAD else None
 
 
-def favourite(quotes):
-    """(side, pre-match price) when recent pre-match midpoints are stable and one side is at 90c+.
+def favourite(quotes, floor=DIP_START):
+    """(side, pre-match price) when recent pre-match midpoints are stable and one side is at `floor` (90c) or more.
 
     `quotes` is a list of (time, yes midpoint), oldest first.
     """
@@ -68,7 +68,7 @@ def favourite(quotes):
         return None
     mid = median(mids)
     side, start = ("yes", mid) if mid > 50 else ("no", 100-mid)
-    return (side, start) if start >= DIP_START else None
+    return (side, start) if start >= floor else None
 
 
 def prints(trades, side, limit, after):

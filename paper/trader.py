@@ -14,6 +14,7 @@ few markets with an order) the order book and the trade record.
   ... dip jit      the 80c bid placed only once the ask falls to 88c ("just in time"),
                    which ties up far less cash; filled only by later prints. Also a
                    real order in men's college basketball and qualifying tennis
+  tennis dip low   first-round qualifying favourite at 85-90c before play: the 80c bid
   tennis prematch  first-round qualifying favourite at 90c+: buy at the ask before play
   nba take         4th quarter or overtime, leader ahead by 6+ with its ask at
                    97-99c: buy at the ask, limited to the size displayed there
@@ -274,6 +275,10 @@ class Trader:
             quotes = watch.get(event, [])
             fresh = quotes and now-quotes[-1][0] <= STALE_QUOTES
             pick = rules.favourite(quotes) if status in rules.DIP_LIVE and fresh else None
+            low = False                                # simulated only: qualifying favourites a little under 90c
+            if not pick and status in rules.DIP_LIVE and fresh and DIPS[series][0] == "tennis" and rules.qualifying(m) == "first":
+                pick = rules.favourite(quotes, rules.DIP_LOW)
+                low = bool(pick)
             # Buy the favourite as NO on the underdog's market when there is one: it carries most of the
             # trading and prints the dip first. The pre-match price still comes from the first-listed market.
             target, side = m, pick and pick[0]
@@ -300,6 +305,9 @@ class Trader:
                 tier = "later-qualifying" if stage else "main-draw"
             common = dict(tier=tier, kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
                           ask_when_placed=book["ask"], round=f"qualifying, {stage} round" if stage else "main draw")
+            if low:
+                self.order(now, rule="tennis_dip_low", price=rules.DIP_BID, **dict(common, tier="simulated"))
+                continue
             self.send(self.order(now, rule=f"{prefix}_dip", price=rules.DIP_BID, **common))
             near = math.floor(start)-rules.DIP_RELATIVE     # simulated only: a bid set relative to the pre-match price
             if near != rules.DIP_BID and book["ask"] > near:

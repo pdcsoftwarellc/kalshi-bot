@@ -120,6 +120,10 @@ already on the exchange stay there until the match ends or they are cancelled by
 - State and a journal are kept in `data/paper/`, so a restart resumes. A match that starts
   while the trader is not running is skipped, because its pre-match price was not observed.
 - Run only one copy against a state folder.
+- `paper/mentions.py` is a separate paper-only program for "mention" markets (will the speaker
+  say X?). It rests a simulated NO bid one cent inside the spread on markets whose event is
+  dated today or tomorrow, with the same bid on the YES side as a control, and reports both:
+  `.venv/bin/python -m paper.mentions run --hours 336` and `... report`.
 - `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
   mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both

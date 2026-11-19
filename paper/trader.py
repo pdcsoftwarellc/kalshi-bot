@@ -372,6 +372,8 @@ class Trader:
                 try:
                     ask = 100*float(m["yes_ask_dollars"]) if o["side"] == "yes" else 100-100*float(m["yes_bid_dollars"])
                     near = ask <= o["price"]+NEAR
+                    if near and "near_at" not in o:    # when a just-in-time bid (trigger 88c) would have been placed
+                        o["near_at"] = now
                 except (KeyError, TypeError, ValueError):
                     near = True
             if not (near and o["status"] == "open") and now-o["polled"] < SLOW_POLL:

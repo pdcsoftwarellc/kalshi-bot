@@ -10,6 +10,9 @@ few markets with an order) the order book and the trade record.
   tennis dip rel   the same, with the bid 10c below the pre-match price
   tennis dip deep  the same, with the bid at 65c
   tennis dip 85    first-round qualifying only: the bid at 85c
+  ... dip 75/70/60 the lower rungs of a ladder, for every dip family
+  ... dip jit      the 80c bid placed only once the ask falls to 88c ("just in time"),
+                   which ties up far less cash; filled only by later prints
   tennis prematch  first-round qualifying favourite at 90c+: buy at the ask before play
   nba take         4th quarter or overtime, leader ahead by 6+ with its ask at
                    97-99c: buy at the ask, limited to the size displayed there
@@ -70,6 +73,8 @@ DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis"
         "KXNCAAWBGAME": ("wcbb", "validated"), "KXNBAGAME": ("nba", "simulated"),
         "KXNCAAWVMATCH": ("vball", "simulated")}
 LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip")       # sent as real orders unless --live-rules says otherwise
+LADDER = (75, 70, 60)                         # simulated lower rungs; 65c is the "deep" row
+WINDOW, SIZED, SHARE = 1200, 300, .25         # fill window after the first print; order size and share of prints for sized returns
 UNDERDOG = (35, 50)                           # men's college basketball underdogs bought on paper before the start
 NBA = "KXNBAGAME"
 BASKET, BASKET_LEAD = ("cbb", "wcbb", "nba"), 600     # families bought before the start, and how long before
@@ -293,6 +298,8 @@ class Trader:
             if near != rules.DIP_BID and book["ask"] > near:
                 self.order(now, rule=f"{prefix}_dip_rel", price=near, **common)
             self.order(now, rule=f"{prefix}_dip_deep", price=rules.DIP_DEEP, **common)   # simulated only: a second, deeper bid
+            for rung in LADDER:                        # simulated only: the rest of a ladder
+                self.order(now, rule=f"{prefix}_dip_{rung}", price=rung, **common)
             if stage == "first" and book["ask"] > rules.DIP_HIGH:
                 self.order(now, rule="tennis_dip_85", price=rules.DIP_HIGH, **common)   # simulated only: fills more often
 
@@ -388,33 +395,58 @@ class Trader:
             self.send(take, available=book["ask_size"])
             self.order(now, rule="nba_rest", kind="rest", price=book["ask"]-1, **common)
 
+    def apply(self, o, trades):
+        """Update one resting bid from the trade record. Returns what the new trades showed."""
+        since = o["seen"]
+        found = rules.prints(trades, o["side"], o["price"], since)
+        o["seen"] = found["latest"]
+        o["size_through"] = o.get("size_through", 0)+found["size_through"]
+        o["size_at"] = o.get("size_at", 0)+found["size_at"]
+        o["touched_at"] = o.get("touched_at") or found["touched_at"]
+        first = o.get("filled_at") or found["filled_at"]
+        if first:                                      # size in the first minutes of the dip, for the fill-window test
+            o["size_window"] = o.get("size_window", 0)+rules.through(trades, o["side"], o["price"], since, first+WINDOW)
+        if o["status"] == "open" and found["filled_at"]:
+            o.update(status="filled", filled_at=found["filled_at"])
+        return found
+
     def fills(self, markets, now):
-        """Check the trade record for every resting bid; near the bid every pass, otherwise every few minutes."""
+        """Check the trade record for every resting bid; near the bid every pass, otherwise every few minutes.
+
+        One read per market serves all of its bids.
+        """
+        groups = defaultdict(list)
         for o in self.state["orders"]:
-            if o["kind"] != "rest" or o["status"] not in ("open", "filled"):
+            if o["kind"] == "rest" and o["status"] in ("open", "filled"):
+                groups[o["ticker"]].append(o)
+        for ticker, group in groups.items():
+            m, due = self.by_ticker.get(ticker), False
+            for o in group:
+                near = o["rule"] == "nba_rest"
+                if m and o["status"] == "open" and not near:
+                    try:
+                        ask = 100*float(m["yes_ask_dollars"]) if o["side"] == "yes" else 100-100*float(m["yes_bid_dollars"])
+                        near = ask <= o["price"]+NEAR
+                        if near and "near_at" not in o:
+                            o["near_at"] = now
+                            if o["rule"].endswith("_dip"):     # simulated only: the same bid, placed just in time
+                                extra = {k: o[k] for k in ("tier", "kind", "event", "ticker", "side", "price", "start", "round") if k in o}
+                                self.order(now, rule=o["rule"]+"_jit", ask_when_placed=ask, **extra)
+                    except (KeyError, TypeError, ValueError):
+                        near = True
+                due = due or (near and o["status"] == "open") or now-o["polled"] >= SLOW_POLL
+            if not due:
                 continue
-            m, near = self.by_ticker.get(o["ticker"]), o["rule"] == "nba_rest"
-            if m and o["status"] == "open" and not near:
-                try:
-                    ask = 100*float(m["yes_ask_dollars"]) if o["side"] == "yes" else 100-100*float(m["yes_bid_dollars"])
-                    near = ask <= o["price"]+NEAR
-                    if near and "near_at" not in o:    # when a just-in-time bid (trigger 88c) would have been placed
-                        o["near_at"] = now
-                except (KeyError, TypeError, ValueError):
-                    near = True
-            if not (near and o["status"] == "open") and now-o["polled"] < SLOW_POLL:
-                continue
-            found = rules.prints(self.trades(o["ticker"], o["seen"]-1), o["side"], o["price"], o["seen"])
-            o["polled"], o["seen"] = now, found["latest"]
-            o["size_through"] = o.get("size_through", 0)+found["size_through"]
-            o["size_at"] = o.get("size_at", 0)+found["size_at"]
-            o["touched_at"] = o.get("touched_at") or found["touched_at"]
-            if self.broker:
-                self.refresh(o)
-            if o["status"] == "open" and found["filled_at"]:
-                o.update(status="filled", filled_at=found["filled_at"])
-                self.log("fill", id=o["id"], rule=o["rule"], event=o["event"], price=o["price"],
-                         size_through=round(o["size_through"], 2))
+            trades = self.trades(ticker, min(o["seen"] for o in group)-1)
+            for o in group:
+                was = o["status"]
+                self.apply(o, trades)
+                o["polled"] = now
+                if self.broker:
+                    self.refresh(o)
+                if was == "open" and o["status"] == "filled":
+                    self.log("fill", id=o["id"], rule=o["rule"], event=o["event"], price=o["price"],
+                             size_through=round(o["size_through"], 2))
 
     def settle(self, markets, live, now):
         for o in self.state["orders"]:
@@ -438,10 +470,7 @@ class Trader:
                 payout = value if o["side"] == "yes" else 1-value
                 live["pnl"] = live["filled"]*payout-live["cost"]-live["fees"]
             if o["kind"] == "rest":                    # trades that printed between the last check and the close
-                found = rules.prints(self.trades(o["ticker"], o["seen"]-1), o["side"], o["price"], o["seen"])
-                o["size_through"] = o.get("size_through", 0)+found["size_through"]
-                if o["status"] == "open" and found["filled_at"]:
-                    o.update(status="filled", filled_at=found["filled_at"])
+                self.apply(o, self.trades(o["ticker"], o["seen"]-1))
             o["payout"] = value if o["side"] == "yes" else 1-value
             o["settled_at"] = stamp(m["settlement_ts"])
             if o["status"] == "filled":
@@ -502,6 +531,15 @@ def summary(orders):
                        net_with_taker_fee=mean(o["net"]-(0 if o["kind"] == "take" else rules.taker_fee(o["price"])) for o in won),
                        median_size=median(o.get("size") or 0 for o in won),
                        dollars_at_clip=sum(o["net"]*min(CLIP, o.get("size") or 0) for o in won)/100)
+        sized = [o for o in won if "size_window" in o]
+        if sized:                                      # a larger order that takes a share of the prints, with and without the window
+            for key, field in (("sized_return", "size_through"), ("sized_return_window", "size_window")):
+                held = [(min(SIZED, SHARE*o[field]), o) for o in sized]
+                paid = sum(n*o["price"] for n, o in held)
+                row[key] = sum(n*o["net"] for n, o in held)/paid if paid else None
+        placed = [o for o in done if o["kind"] == "rest" and "settled_at" in o]
+        if placed:
+            row["hours_funded"] = mean((o["settled_at"]-o["placed"])/3600 for o in placed)
         sent = [o["live"] for o in rows if "order_id" in (o.get("live") or {})]
         if sent:                                       # real orders, in dollars, from the exchange's own figures
             closed = [l for l in sent if "pnl" in l]
@@ -551,6 +589,12 @@ def report(out=OUT):
             print(f'  won {r["win_rate"]:.1%} against {r["needed"]:.1%} needed, losses {r["losses"]}, net {r["net_cents"]:+.2f}c per contract '
                   f'(95% interval {r["ci95"]}), {r["net_with_taker_fee"]:+.2f}c with the full taker fee')
             print(f'  median size available {r["median_size"]:.0f} contracts; ${r["dollars_at_clip"]:+.2f} at up to {CLIP} contracts a trade')
+        if r.get("sized_return") is not None:
+            window = r.get("sized_return_window")
+            print(f'  at {SIZED} contracts taking {SHARE:.0%} of the prints: {r["sized_return"]:+.1%}'
+                  +(f', {window:+.1%} with fills limited to the first {WINDOW//60} minutes' if window is not None else ""))
+        if "hours_funded" in r:
+            print(f'  cash reserved for {r["hours_funded"]:.1f} hours per bid on average')
         if "live" in r:
             l = r["live"]
             print(f'  LIVE: {l["orders"]} real orders, {l["with_fills"]} with fills ({l["contracts_filled"]:.0f} contracts), '

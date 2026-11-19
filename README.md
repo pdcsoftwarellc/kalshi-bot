@@ -101,6 +101,7 @@ place an order.
 | Women's college basketball dip | The same three bids on women's college games | The 80¢ bid only |
 | NBA and college volleyball dips | The same three bids on NBA pre-game favourites and women's college volleyball | No |
 | College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | No |
+| Ladder and just-in-time rows | For every dip family: bids at 75¢, 70¢ and 60¢, and the 80¢ bid placed only once the ask falls to 88¢. `report` also shows the 80¢ bid's return at 300 contracts with fills limited to the first 20 minutes | No |
 | Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | No |
 
 Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and
@@ -129,6 +130,8 @@ already on the exchange stay there until the match ends or they are cancelled by
   NO bid is also a real post-only order when the market is not a sports broadcast and YES is
   priced 20–80¢, for at most five words per event (`--contracts 3 --max-exposure 25
   --max-loss 15` by default). The `STOP` file stops it too.
+  It places the same simulated pair on Netflix chart and reality TV markets (`wide_no`,
+  `wide_mirror`); those are never real.
 - `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
   mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both

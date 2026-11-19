@@ -26,6 +26,11 @@ and YES is priced 20-80c, for at most five words per event. The mirror is
 never real. New real orders stop at --max-exposure, at --max-loss, or while a
 file named STOP exists in the state folder (the same file stops the trader).
 
+The same pair of simulated bids is placed on Netflix chart and reality TV
+markets (rules wide_no and wide_mirror), where research/resting_no_wide.py
+found the same pattern at small size. These are bid at first sight whatever
+their date, checked less often, and never real.
+
 It makes one public request every few seconds, so it can run beside the
 trader without crowding it. State is saved after every change.
 
@@ -53,15 +58,23 @@ from paper.trader import Api, interval, stamp
 
 OUT = ROOT / "data/paper"
 MONTHS = dict(JAN=1, FEB=2, MAR=3, APR=4, MAY=5, JUN=6, JUL=7, AUG=8, SEP=9, OCT=10, NOV=11, DEC=12)
-MIN_SPREAD, FILL_POLL, SETTLE_POLL, SERIES_REFRESH, LOOKS, LOOK_AGAIN = 2, 600, 900, 6*3600, 6, 1800
+MIN_SPREAD, FILL_POLL, SETTLE_POLL, SERIES_REFRESH, LOOKS, LOOK_AGAIN = 2, 1800, 900, 6*3600, 6, 1800
+WIDE_FILL_POLL, WIDE_SETTLE_POLL = 6*3600, 3600   # the extra families settle days out: check them less often
+EXTRA = (("Netflix charts", r"NETFLIX"),
+         ("reality TV", r"BIGBROTHER|LIUK|LIUSA|LOVEISLAND|TRAITORS|SURVIVOR|DWTS|DANCINGWITH|BACHELOR|VOICE|AGT|AMERICANIDOL|MRBEASTGAMES"))
 LIVE_YES, LIVE_PER_EVENT = (20, 80), 5         # real orders: mid-priced words only, a few per speech
 FAMILIES = (("earnings calls", r"EARN"), ("Trump", r"TRUMP|DJT|PRESMENTION"),
             ("TV and media", r"SNL|KIMMEL|COLBERT|FALLON|MADDOW|ROGAN|TUCKER|NEWS|SHOW|WEEKNIGHT|FNS|AWARD|ENTMENTION"),
             ("sports broadcasts", r"NBA|NFL|MLB|NCAA|SNF|TNF|MNF|NHL|CFB|WNBA|UFC"))
 
 
+def extra(ticker):
+    """The non-mention family a ticker belongs to ("Netflix charts", "reality TV"), or None."""
+    return None if "MENTION" in ticker else next((name for name, pattern in EXTRA if re.search(pattern, ticker)), None)
+
+
 def family(ticker):
-    return next((name for name, pattern in FAMILIES if re.search(pattern, ticker)), "politicians and officials")
+    return extra(ticker) or next((name for name, pattern in FAMILIES if re.search(pattern, ticker)), "politicians and officials")
 
 
 def event_day(event):
@@ -140,16 +153,19 @@ class Mentions:
         """List the open markets of the next mention series and queue the ones whose event is today or tomorrow."""
         if not self.state["series"] or now-self.state["listed"] > SERIES_REFRESH:
             rows = self.api.get("/series", category="Mentions").get("series", [])
-            self.state.update(series=sorted(s["ticker"] for s in rows), listed=now, next=0)
+            more = [s for s in self.api.get("/series", category="Entertainment").get("series", []) if extra(s["ticker"])]
+            self.state.update(series=sorted({s["ticker"] for s in rows+more}), listed=now, next=0)
             return
         series = self.state["series"][self.state["next"] % len(self.state["series"])]
         self.state["next"] += 1
         today = datetime.fromtimestamp(now, timezone.utc).date()
         for m in self.api.get("/markets", status="open", series_ticker=series, limit=1000).get("markets", []):
             day = event_day(m["event_ticker"])
-            if m["ticker"] in self.done or m["ticker"] in self.state["queue"] or day is None:
+            if m["ticker"] in self.done or m["ticker"] in self.state["queue"]:
                 continue
-            if today <= day <= today+timedelta(days=1):
+            if extra(m["ticker"]):
+                self.state["queue"][m["ticker"]] = dict(event=m["event_ticker"], day=str(day or ""), looks=0, look_at=0)
+            elif day is not None and today <= day <= today+timedelta(days=1):
                 self.state["queue"][m["ticker"]] = dict(event=m["event_ticker"], day=str(day), looks=0, look_at=0)
 
     def quote(self, ticker, now):
@@ -163,7 +179,8 @@ class Mentions:
                 self.done.add(ticker)
                 del self.state["queue"][ticker]
             return
-        for rule, side, bid in (("mention_no", "no", no+1), ("mention_mirror", "yes", yes+1)):
+        kind = "wide" if extra(ticker) else "mention"
+        for rule, side, bid in ((f"{kind}_no", "no", no+1), (f"{kind}_mirror", "yes", yes+1)):
             self.state["orders"].append(dict(id=len(self.state["orders"])+1, rule=rule, family=family(ticker), ticker=ticker,
                                              event=item["event"], day=item["day"], side=side, price=bid, spread=100-yes-no,
                                              yes_mid=(yes+100-no)/2,
@@ -220,8 +237,10 @@ class Mentions:
             if o["status"] in ("open", "filled"):
                 waiting[o["ticker"]].append(o)
         fresh = [t for t, item in self.state["queue"].items() if now >= item["look_at"]]
-        due_fill = [t for t, group in waiting.items() if now-min(o["polled"] for o in group) > FILL_POLL]
-        due_settle = [t for t, group in waiting.items() if now-min(o["checked"] for o in group) > SETTLE_POLL]
+        due_fill = [t for t, group in waiting.items()
+                    if now-min(o["polled"] for o in group) > (WIDE_FILL_POLL if extra(t) else FILL_POLL)]
+        due_settle = [t for t, group in waiting.items()
+                      if now-min(o["checked"] for o in group) > (WIDE_SETTLE_POLL if extra(t) else SETTLE_POLL)]
         if fresh:
             self.quote(fresh[0], now)
         elif due_settle:

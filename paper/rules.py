@@ -93,6 +93,16 @@ def prints(trades, side, limit, after):
     return out
 
 
+def through(trades, side, limit, after, until):
+    """Contracts that printed strictly below `limit` on `side`, later than `after` and no later than `until`."""
+    total = 0.0
+    for t in trades:
+        when = datetime.fromisoformat(t["created_time"].replace("Z", "+00:00")).timestamp()
+        if after < when <= until and round(100*float(t[f"{side}_price_dollars"])) < limit:
+            total += float(t["count_fp"])
+    return total
+
+
 def nba_leader(event, ticker, state):
     """The side ("yes" or "no") leading in the 4th quarter or overtime, else None.
 

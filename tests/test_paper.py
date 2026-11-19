@@ -96,7 +96,8 @@ def test_tennis_dip_from_pre_match_to_settlement(tmp_path):
     api.books[ticker] = book(91, 93)
     start = T0+260
     trader.step(start)
-    order, relative, deep = trader.state["orders"]
+    order, relative, deep, *ladder = trader.state["orders"]
+    assert [(o["rule"], o["price"]) for o in ladder] == [("tennis_dip_75", 75), ("tennis_dip_70", 70), ("tennis_dip_60", 60)]
     assert (deep["rule"], deep["price"]) == ("tennis_dip_deep", 65)
     assert (relative["rule"], relative["price"]) == ("tennis_dip_rel", 83)
     assert (order["rule"], order["tier"], order["side"], order["price"], order["start"], order["status"]) == \
@@ -106,22 +107,28 @@ def test_tennis_dip_from_pre_match_to_settlement(tmp_path):
     api.tape[ticker] = [trade(start+30, 80, 40)]
     trader.step(start+40)
     assert order["status"] == "open" and order["touched_at"] == start+30
+    jit = trader.state["orders"][-1]                             # the ask reached 88c: the same bid, placed just in time
+    assert (jit["rule"], jit["price"], jit["placed"], jit["status"]) == ("tennis_dip_jit", 80, start+40, "open")
 
     api.tape[ticker].append(trade(start+50, 78, 25))
     trader.step(start+60)
-    assert order["status"] == "filled" and order["size_through"] == 25
+    assert order["status"] == "filled" and order["size_through"] == 25 and order["size_window"] == 25
+    assert jit["status"] == "filled" and ladder[0]["status"] == "open"
+    api.tape[ticker].append(trade(start+50+1500, 79, 60))       # a late print: outside the 20-minute window
 
     del api.listing[ticker]
     api.settled[ticker] = dict(status="finalized", settlement_value_dollars="1.0000", settlement_ts=iso(start+900))
     trader.step(start+1000)
-    assert (order["status"], order["payout"], order["net"], order["size"]) == ("settled", 1.0, 20, 25)
+    assert (order["status"], order["payout"], order["net"], order["size"]) == ("settled", 1.0, 20, 85)
+    assert order["size_window"] == 25 and ladder[0]["status"] == "expired"
 
     # A restart reads the same state and does not place a second order for the match.
     again = Trader(api, tmp_path)
     again.step(start+1100)
-    assert len(again.state["orders"]) == 3
+    assert len(again.state["orders"]) == 7
     row = summary(again.state["orders"])["tennis_dip (main-draw)"]
-    assert (row["fills"], row["win_rate"], row["net_cents"], row["dollars_at_clip"]) == (1, 1.0, 20, 5.0)
+    assert (row["fills"], row["win_rate"], row["net_cents"], row["dollars_at_clip"]) == (1, 1.0, 20, 17.0)
+    assert row["sized_return"] == row["sized_return_window"] == 0.25
 
 
 def test_tennis_match_already_live_is_skipped(tmp_path):
@@ -239,7 +246,8 @@ def test_college_basketball_sends_only_the_80c_bid(tmp_path):
     api.books[ticker] = book(92, 94)
     trader.step(T0+260)
     assert [(o["rule"], o["tier"], o["price"]) for o in trader.state["orders"]] == \
-        [("cbb_dip", "validated", 80), ("cbb_dip_rel", "validated", 83), ("cbb_dip_deep", "validated", 65)]
+        [("cbb_dip", "validated", 80), ("cbb_dip_rel", "validated", 83), ("cbb_dip_deep", "validated", 65),
+         ("cbb_dip_75", "validated", 75), ("cbb_dip_70", "validated", 70), ("cbb_dip_60", "validated", 60)]
     assert broker.sent == [(ticker, "yes", 80, 5, True)]
 
 
@@ -289,7 +297,7 @@ def test_only_qualifying_tennis_matches_send_real_orders(tmp_path):
     dip = trader.state["orders"][1]
     assert (dip["rule"], dip["tier"], dip["round"]) == ("tennis_dip", "validated", "qualifying, first round")
     assert broker.sent == [(dog, "no", 80, 5, True)]             # only the 80c bid is real
-    assert [o["rule"] for o in trader.state["orders"]][1:] == ["tennis_dip", "tennis_dip_rel", "tennis_dip_deep", "tennis_dip_85"]
+    assert [o["rule"] for o in trader.state["orders"]][1:] == ["tennis_dip", "tennis_dip_rel", "tennis_dip_deep", "tennis_dip_75", "tennis_dip_70", "tennis_dip_60", "tennis_dip_85"]
     api.listing[dog] = dict(market(dog, 17, 19), rules_primary=text)      # near the bid: the exchange is read each pass
     broker.order = lambda order_id: dict(status="resting", filled=0, remaining=5, cost=0, fees=0)
     trader.step(T0+280)
@@ -356,7 +364,7 @@ def test_basket_buys_a_basketball_favourite_just_before_the_start(tmp_path):
 
     api.states[event] = dict(status="inprogress", period=1, home_points=0, away_points=0)
     trader.step(T0+1010)
-    assert [(o["rule"], o["tier"]) for o in trader.state["orders"]][1:] == \
+    assert [(o["rule"], o["tier"]) for o in trader.state["orders"]][1:4] == \
         [("wcbb_dip", "validated"), ("wcbb_dip_rel", "validated"), ("wcbb_dip_deep", "validated")]
     assert not broker.sent                                       # this broker was not given the women's rule
 
@@ -408,9 +416,9 @@ def test_nba_dip_and_late_rule_do_not_block_each_other(tmp_path):
         trader.step(T0+20*i)
     api.states[event] = dict(status="inprogress", period=1, home_points=2, away_points=0)
     trader.step(T0+260)
-    assert [o["rule"] for o in trader.state["orders"]] == ["nba_dip", "nba_dip_rel", "nba_dip_deep"]
+    assert [o["rule"] for o in trader.state["orders"]] == ["nba_dip", "nba_dip_rel", "nba_dip_deep", "nba_dip_75", "nba_dip_70", "nba_dip_60"]
     api.states[event] = dict(status="inprogress", period=4, home_points=100, away_points=80)
     api.listing[ticker] = market(ticker, 2, 3)
     api.books[ticker] = book(2, 3, 500)
     trader.step(T0+280)
-    assert [o["rule"] for o in trader.state["orders"]][3:] == ["nba_take", "nba_rest"]
+    assert [o["rule"] for o in trader.state["orders"]][6:] == ["nba_take", "nba_rest"]

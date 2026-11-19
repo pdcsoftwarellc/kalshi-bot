@@ -109,3 +109,17 @@ def test_live_skips_sports_broadcasts_and_extreme_prices(tmp_path):
     for i in range(3):
         book.step(T0+4*i)
     assert len(book.state["orders"]) == 2 and not broker.sent
+
+
+def test_netflix_and_reality_tv_markets_are_bid_on_paper_whatever_their_date(tmp_path):
+    ticker = "KXNETFLIXRANKSHOW-27JAN05-A"
+    api, broker = FakeApi(), FakeBroker()
+    api.markets = [dict(ticker=ticker, event_ticker="KXNETFLIXRANKSHOW-27JAN05")]
+    api.book = dict(orderbook_fp=dict(yes_dollars=[["0.4000", "50"]], no_dollars=[["0.5200", "80"]]))
+    book = Mentions(api, tmp_path, broker)
+    for i in range(3):
+        book.step(T0+4*i)
+    assert [(o["rule"], o["family"]) for o in book.state["orders"]] == \
+        [("wide_no", "Netflix charts"), ("wide_mirror", "Netflix charts")]
+    assert not broker.sent                                       # never real
+    assert family("KXSURVIVORELIMINATION-26DEC03-X") == "reality TV" and family("KXSURVIVORMENTION-26DEC03-X") != "reality TV"

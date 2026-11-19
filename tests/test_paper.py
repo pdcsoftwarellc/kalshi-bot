@@ -317,7 +317,8 @@ def test_nba_stays_simulated_unless_named_as_a_live_rule(tmp_path):
 
 def test_only_first_round_qualifying_counts():
     stage = lambda text: rules.qualifying(dict(rules_primary=f"... in the 2026 ATP Challenger Kobe {text} after a ball ..."))
-    assert stage("Qualification Round 1") == "first" and stage("Qualifiers Round") == "first"
+    assert stage("Qualification Round 1") == "first" and stage("Qualifying") == "first"
+    assert stage("Qualifiers Round Robin") is None               # Billie Jean King Cup team ties
     assert stage("Qualification Round 2") == "later" and stage("Qualification Final") == "later"
     assert stage("Round Of 16") is None and rules.qualifying({}) is None
 

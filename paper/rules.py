@@ -24,8 +24,9 @@ def qualifying(market):
     """"first" for a first-round tennis qualifying match, "later" for later qualifying rounds, else None.
 
     Read from the market's rules text ("... Qualification Round 1 ...", "... Qualification Final ...").
+    "Qualifiers" is not qualifying: it names team ties such as the Billie Jean King Cup Qualifiers.
     """
-    found = re.search(r"\bQualif\w*( Final| Round (\d+))?", market.get("rules_primary") or "")
+    found = re.search(r"\bQualif(?:ication|ying)\b( Final| Round (\d+))?", market.get("rules_primary") or "")
     if not found:
         return None
     return "first" if found.group(1) is None or found.group(2) == "1" else "later"

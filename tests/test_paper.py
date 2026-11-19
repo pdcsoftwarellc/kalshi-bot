@@ -446,3 +446,45 @@ def test_just_in_time_bid_is_a_second_real_order_for_mens_basketball_only(tmp_pa
     assert [o["rule"] for o in jit] == ["cbb_dip_jit", "wcbb_dip_jit"]
     assert broker.sent[2:] == [(tickers[0], "yes", 80, 5, True)]  # the women's just-in-time bid stays on paper
     assert "order_id" in jit[0]["live"] and "live" not in jit[1]
+
+
+class FakeStream:
+    def __init__(self):
+        self.quotes, self.watched = {}, set()
+
+    def watch(self, tickers):
+        self.watched = set(tickers)
+
+    def quote(self, ticker):
+        return self.quotes.get(ticker)
+
+
+def test_live_stream_triggers_the_just_in_time_bid_between_passes(tmp_path):
+    event, ticker = "KXNCAAMBGAME-26NOV18DUKEUNC", "KXNCAAMBGAME-26NOV18DUKEUNC-DUKE"
+    api, broker, stream = FakeApi(), FakeBroker(), FakeStream()
+    broker.rules, broker.max_exposure = ("cbb_dip", "cbb_dip_jit"), 100
+    api.listing[ticker] = market(ticker, 93, 94)
+    api.states[event] = dict(status="scheduled")
+    api.books[ticker] = book(92, 94)
+    trader = Trader(api, tmp_path, broker, stream)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="inprogress", period=1, home_points=2, away_points=0)
+    trader.step(T0+260)
+    assert stream.watched == {ticker} and len(broker.sent) == 1   # the resting bid; the stream follows its market
+
+    trader.watch(0)                                              # no quote from the stream yet: nothing happens
+    stream.quotes[ticker] = (90, 92, T0+261)
+    trader.watch(0)                                              # ask 92c: not near
+    assert not [o for o in trader.state["orders"] if o["rule"].endswith("_jit")]
+    stream.quotes[ticker] = (85, 87, T0+262)
+    trader.watch(0)
+    trader.watch(0)                                              # fires once
+    (jit,) = [o for o in trader.state["orders"] if o["rule"].endswith("_jit")]
+    assert (jit["trigger"], jit["price"], jit["ask_when_placed"]) == ("stream", 80, 87) and len(broker.sent) == 2
+
+    api.listing[ticker] = market(ticker, 86, 87)                 # the next pass sees it too: no second bid
+    trader.step(T0+280)
+    base = trader.state["orders"][0]
+    assert base["near_by"] == "stream" and base["poll_near_at"] == T0+280 and len(broker.sent) == 2
+    assert stream.watched == set()                               # nothing left to wait for

@@ -123,6 +123,10 @@ already on the exchange stay there until the match ends or they are cancelled by
 - State and a journal are kept in `data/paper/`, so a restart resumes. A match that starts
   while the trader is not running is skipped, because its pre-match price was not observed.
 - Run only one copy against a state folder.
+- With Kalshi credentials in `.env`, the trader also follows the markets waiting on a
+  just-in-time bid over Kalshi's WebSocket price stream (`paper/stream.py`) and acts within
+  about a second. If the stream drops, the pass-by-pass polling does the same job more
+  slowly; `--no-stream` turns the stream off. `report` shows which of the two fired.
 - `paper/mentions.py` is a separate program for "mention" markets (will the speaker say X?).
   It rests a simulated NO bid one cent inside the spread on markets whose event is dated
   today or tomorrow, with the same bid on the YES side as a control, and reports both:

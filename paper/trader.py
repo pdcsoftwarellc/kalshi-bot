@@ -41,6 +41,11 @@ Kalshi account as a real order
 exposure would pass --max-exposure, when settled live losses reach --max-loss,
 or while a file named STOP exists in the state folder.
 
+Just-in-time bids need the quote quickly. With credentials present the trader
+also follows those markets on Kalshi's live price stream (paper/stream.py)
+between passes and acts within about a second; if the stream is down, or run
+with --no-stream, the pass-by-pass polling does the same job more slowly.
+
 State is saved after every pass, so a restart resumes where it stopped.
 
   .venv/bin/python -m paper.trader run --hours 24
@@ -65,6 +70,7 @@ sys.path.insert(0, str(ROOT))
 import config
 from paper import rules
 from paper.broker import Broker, BrokerError
+from paper.stream import Stream
 
 OUT = ROOT / "data/paper"
 # Series that get dip bids: (rule prefix, tier). Only "validated" rows of a rule in --live-rules are sent live.
@@ -111,8 +117,8 @@ def stamp(text):
 
 
 class Trader:
-    def __init__(self, api, out=OUT, broker=None):
-        self.api, self.out, self.broker = api, Path(out), broker
+    def __init__(self, api, out=OUT, broker=None, stream=None):
+        self.api, self.out, self.broker, self.stream = api, Path(out), broker, stream
         self.out.mkdir(parents=True, exist_ok=True)
         file = self.out/"state.json"
         self.state = json.loads(file.read_text()) if file.exists() else dict(watch={}, handled=[], orders=[])
@@ -396,6 +402,40 @@ class Trader:
             self.send(take, available=book["ask_size"])
             self.order(now, rule="nba_rest", kind="rest", price=book["ask"]-1, **common)
 
+    def near(self, o, ask, now, by):
+        """The ask has come within reach of a resting bid: note it and place the just-in-time version of the bid.
+
+        The just-in-time bid is real as well in men's college basketball and qualifying tennis: a second
+        bid behind our own resting one, to measure the queue a late bid meets.
+        """
+        o.update(near_at=now, near_by=by)
+        if o["rule"].endswith("_dip"):
+            extra = {k: o[k] for k in ("tier", "kind", "event", "ticker", "side", "price", "start", "round") if k in o}
+            self.send(self.order(now, rule=o["rule"]+"_jit", ask_when_placed=ask, trigger=by, **extra))
+
+    def waiting(self):
+        """Resting dip bids whose ask has not yet come near: the ones a just-in-time bid is waiting on."""
+        return [o for o in self.state["orders"]
+                if o["status"] == "open" and o["rule"].endswith("_dip") and "near_at" not in o]
+
+    def watch(self, until, pause=.25):
+        """Between passes, act on the live stream's quotes. Without a stream this only waits."""
+        while True:
+            fired = False
+            for o in self.waiting() if self.stream else ():
+                quote = self.stream.quote(o["ticker"])
+                if not quote:
+                    continue
+                ask = quote[1] if o["side"] == "yes" else 100-quote[0]
+                if 0 < ask < 100 and ask <= o["price"]+NEAR:
+                    self.near(o, ask, time.time(), "stream")
+                    fired = True
+            if fired:
+                self.save()
+            if time.time() >= until:
+                return
+            time.sleep(max(0, min(pause, until-time.time())))
+
     def apply(self, o, trades):
         """Update one resting bid from the trade record. Returns what the new trades showed."""
         since = o["seen"]
@@ -428,13 +468,10 @@ class Trader:
                     try:
                         ask = 100*float(m["yes_ask_dollars"]) if o["side"] == "yes" else 100-100*float(m["yes_bid_dollars"])
                         near = ask <= o["price"]+NEAR
-                        if near and "near_at" not in o:
-                            o["near_at"] = now
-                            if o["rule"].endswith("_dip"):     # simulated only: the same bid, placed just in time
-                                extra = {k: o[k] for k in ("tier", "kind", "event", "ticker", "side", "price", "start", "round") if k in o}
-                                # Real as well for men's college basketball and qualifying tennis: a second bid
-                                # behind our own resting one, to measure the queue a late bid meets.
-                                self.send(self.order(now, rule=o["rule"]+"_jit", ask_when_placed=ask, **extra))
+                        if near:
+                            o.setdefault("poll_near_at", now)   # when polling alone would have seen it
+                            if "near_at" not in o:
+                                self.near(o, ask, now, "poll")
                     except (KeyError, TypeError, ValueError):
                         near = True
                 due = due or (near and o["status"] == "open") or now-o["polled"] >= SLOW_POLL
@@ -497,6 +534,8 @@ class Trader:
         self.nba(markets, live, now)
         self.fills(markets, now)
         self.settle(markets, live, now)
+        if self.stream:
+            self.stream.watch({o["ticker"] for o in self.waiting()})
         self.save()
         return len(markets), len(live)
 
@@ -608,6 +647,14 @@ def report(out=OUT):
         print("\nPre-game gap of 90c+ favourites (history: about +3.5c first-round qualifying, +2.5c college basketball, +1c other)")
         for (group, week), g in weekly.items():
             print(f'  {group:31} {week:9} favourites {g["favourites"]:4}  price {g["price"]:.1f}c  won {g["won"]:.1%}  gap {g["gap_cents"]:+.1f}c')
+    leads = [o["poll_near_at"]-o["near_at"] for o in state["orders"] if o.get("near_by") == "stream" and "poll_near_at" in o]
+    by = defaultdict(int)
+    for o in state["orders"]:
+        if "near_by" in o and o["rule"].endswith("_dip"):
+            by[o["near_by"]] += 1
+    if by:
+        print(f'\nJust-in-time triggers: {by["stream"]} from the live stream, {by["poll"]} from polling'
+              +(f'; the stream was ahead of polling by a median {median(leads):.0f} seconds ({len(leads)} games)' if leads else ""))
     for name, late in (("Real resting bids", False), ("Real just-in-time bids", True)):
         queued = [o["live"] for o in state["orders"]
                   if "queue_first" in (o.get("live") or {}) and o["rule"].endswith("_jit") == late]
@@ -627,6 +674,7 @@ def main():
     parser.add_argument("--contracts", type=int, default=3, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
+    parser.add_argument("--no-stream", action="store_true", help="do not use the live price stream; poll only")
     parser.add_argument("--live-rules", nargs="+", choices=(*LIVE_RULES, "nba_take"), default=list(LIVE_RULES),
                         help="rules allowed to place real orders; everything else is simulated")
     args = parser.parse_args()
@@ -638,7 +686,11 @@ def main():
         broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules)
         print(f"LIVE ({', '.join(args.live_rules)}): real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
               f"an order, at most ${args.max_exposure:.0f} unsettled, stop after ${args.max_loss:.0f} lost", flush=True)
-    trader, stop, passes = Trader(Api(), args.dir, broker), time.time()+args.hours*3600, 0
+    stream = None
+    if not args.no_stream and config.KALSHI_API_KEY and config.KALSHI_PRIVATE_KEY_PATH:
+        stream = Stream()
+        stream.start()
+    trader, stop, passes = Trader(Api(), args.dir, broker, stream), time.time()+args.hours*3600, 0
     while time.time() < stop:
         began = time.time()
         try:
@@ -651,7 +703,7 @@ def main():
                       f'({sum(o["status"] == "open" for o in orders)} waiting)', flush=True)
         except (httpx.HTTPError, RuntimeError, KeyError, ValueError, TypeError) as exc:
             print(f"{datetime.now(timezone.utc):%H:%M:%S} pass skipped ({type(exc).__name__}: {exc})", flush=True)
-        time.sleep(max(1, args.every-(time.time()-began)))
+        trader.watch(max(time.time()+1, began+args.every))
 
 
 if __name__ == "__main__":

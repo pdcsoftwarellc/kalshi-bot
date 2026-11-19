@@ -12,7 +12,8 @@ few markets with an order) the order book and the trade record.
   tennis dip 85    first-round qualifying only: the bid at 85c
   ... dip 75/70/60 the lower rungs of a ladder, for every dip family
   ... dip jit      the 80c bid placed only once the ask falls to 88c ("just in time"),
-                   which ties up far less cash; filled only by later prints
+                   which ties up far less cash; filled only by later prints. Also a
+                   real order in men's college basketball and qualifying tennis
   tennis prematch  first-round qualifying favourite at 90c+: buy at the ask before play
   nba take         4th quarter or overtime, leader ahead by 6+ with its ask at
                    97-99c: buy at the ask, limited to the size displayed there
@@ -72,7 +73,7 @@ DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis"
         "KXNCAAMBGAME": ("cbb", "validated"),
         "KXNCAAWBGAME": ("wcbb", "validated"), "KXNBAGAME": ("nba", "simulated"),
         "KXNCAAWVMATCH": ("vball", "simulated")}
-LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip")       # sent as real orders unless --live-rules says otherwise
+LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip", "tennis_dip_jit", "cbb_dip_jit")       # sent as real orders unless --live-rules says otherwise
 LADDER = (75, 70, 60)                         # simulated lower rungs; 65c is the "deep" row
 WINDOW, SIZED, SHARE = 1200, 300, .25         # fill window after the first print; order size and share of prints for sized returns
 UNDERDOG = (35, 50)                           # men's college basketball underdogs bought on paper before the start
@@ -431,7 +432,9 @@ class Trader:
                             o["near_at"] = now
                             if o["rule"].endswith("_dip"):     # simulated only: the same bid, placed just in time
                                 extra = {k: o[k] for k in ("tier", "kind", "event", "ticker", "side", "price", "start", "round") if k in o}
-                                self.order(now, rule=o["rule"]+"_jit", ask_when_placed=ask, **extra)
+                                # Real as well for men's college basketball and qualifying tennis: a second bid
+                                # behind our own resting one, to measure the queue a late bid meets.
+                                self.send(self.order(now, rule=o["rule"]+"_jit", ask_when_placed=ask, **extra))
                     except (KeyError, TypeError, ValueError):
                         near = True
                 due = due or (near and o["status"] == "open") or now-o["polled"] >= SLOW_POLL
@@ -605,10 +608,12 @@ def report(out=OUT):
         print("\nPre-game gap of 90c+ favourites (history: about +3.5c first-round qualifying, +2.5c college basketball, +1c other)")
         for (group, week), g in weekly.items():
             print(f'  {group:31} {week:9} favourites {g["favourites"]:4}  price {g["price"]:.1f}c  won {g["won"]:.1%}  gap {g["gap_cents"]:+.1f}c')
-    queued = [o["live"] for o in state["orders"] if "queue_first" in (o.get("live") or {})]
-    if queued:
-        print(f'\nReal resting bids: median {median(l["queue_first"] for l in queued):.0f} contracts ahead in the queue when first read '
-              f'({len(queued)} orders)')
+    for name, late in (("Real resting bids", False), ("Real just-in-time bids", True)):
+        queued = [o["live"] for o in state["orders"]
+                  if "queue_first" in (o.get("live") or {}) and o["rule"].endswith("_jit") == late]
+        if queued:
+            print(f'\n{name}: median {median(l["queue_first"] for l in queued):.0f} contracts ahead in the queue when first read '
+                  f'({len(queued)} orders)')
     return table
 
 

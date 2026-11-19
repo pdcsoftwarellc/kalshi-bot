@@ -422,3 +422,27 @@ def test_nba_dip_and_late_rule_do_not_block_each_other(tmp_path):
     api.books[ticker] = book(2, 3, 500)
     trader.step(T0+280)
     assert [o["rule"] for o in trader.state["orders"]][6:] == ["nba_take", "nba_rest"]
+
+
+def test_just_in_time_bid_is_a_second_real_order_for_mens_basketball_only(tmp_path):
+    api, broker = FakeApi(), FakeBroker()
+    broker.rules, broker.max_exposure = ("cbb_dip", "wcbb_dip", "cbb_dip_jit", "tennis_dip_jit"), 100
+    tickers = ["KXNCAAMBGAME-26NOV18DUKEUNC-DUKE", "KXNCAAWBGAME-26NOV18UCONNLSU-UCONN"]
+    for ticker in tickers:
+        api.listing[ticker] = market(ticker, 93, 94)
+        api.states[ticker.rsplit("-", 1)[0]] = dict(status="scheduled")
+        api.books[ticker] = book(92, 94)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    for ticker in tickers:
+        api.states[ticker.rsplit("-", 1)[0]] = dict(status="inprogress", period=1, home_points=2, away_points=0)
+    trader.step(T0+260)
+    assert broker.sent == [(tickers[0], "yes", 80, 5, True), (tickers[1], "yes", 80, 5, True)]
+    for ticker in tickers:
+        api.listing[ticker] = market(ticker, 86, 87)             # the ask reaches 88c in both games
+    trader.step(T0+280)
+    jit = [o for o in trader.state["orders"] if o["rule"].endswith("_jit")]
+    assert [o["rule"] for o in jit] == ["cbb_dip_jit", "wcbb_dip_jit"]
+    assert broker.sent[2:] == [(tickers[0], "yes", 80, 5, True)]  # the women's just-in-time bid stays on paper
+    assert "order_id" in jit[0]["live"] and "live" not in jit[1]

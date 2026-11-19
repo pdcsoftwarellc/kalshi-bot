@@ -101,7 +101,7 @@ place an order.
 | Women's college basketball dip | The same three bids on women's college games | The 80¢ bid only |
 | NBA and college volleyball dips | The same three bids on NBA pre-game favourites and women's college volleyball | No |
 | College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | No |
-| Ladder and just-in-time rows | For every dip family: bids at 75¢, 70¢ and 60¢, and the 80¢ bid placed only once the ask falls to 88¢. `report` also shows the 80¢ bid's return at 300 contracts with fills limited to the first 20 minutes | No |
+| Ladder and just-in-time rows | For every dip family: bids at 75¢, 70¢ and 60¢, and the 80¢ bid placed only once the ask falls to 88¢. `report` also shows the 80¢ bid's return at 300 contracts with fills limited to the first 20 minutes | The just-in-time bid only, in men's college basketball and first-round qualifying tennis, as a second order beside the resting one |
 | Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | No |
 
 Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and

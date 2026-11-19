@@ -96,6 +96,8 @@ place an order.
 | Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | First-round qualifying only, on every tour |
 | Tennis dip variants | The same with the bid 10¢ below the pre-match price, at 65¢, and at 85¢ in first-round qualifying | No |
 | Tennis dip, 85–90¢ | First-round qualifying favourite at 85–90¢ before play: the 80¢ bid | No |
+| Tennis dip, 80–90¢ | First-round qualifying favourite at 80–90¢ before play: bids 10¢ and 20¢ below the pre-match price | No |
+| Women's college dip, 80–90¢ | Women's college favourite at 80–90¢ before play: a bid 15¢ below the pre-match price | No |
 | Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
 | NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |
 | College basketball dip | The three tennis dip bids on men's college games | The 80¢ bid only |

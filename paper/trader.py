@@ -83,7 +83,8 @@ DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis"
 LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip", "tennis_dip_jit", "cbb_dip_jit")       # sent as real orders unless --live-rules says otherwise
 LADDER = (75, 70, 60)                         # simulated lower rungs; 65c is the "deep" row
 WINDOW, SIZED, SHARE = 1200, 300, .25         # fill window after the first print; order size and share of prints for sized returns
-UNDERDOG = (35, 50)                           # men's college basketball underdogs bought on paper before the start
+UNDERDOG = (35, 50)                             # men's college basketball underdogs bought on paper before the start
+LOW = {"tennis": (10, 20), "wcbb": (15,)}       # simulated only: cents below the pre-match price, for 80-90c favourites
 NBA = "KXNBAGAME"
 BASKET, BASKET_LEAD = ("cbb", "wcbb", "nba"), 600     # families bought before the start, and how long before
 SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL, HORIZON = 300, 8, 600, 60, 12*3600
@@ -275,10 +276,11 @@ class Trader:
             quotes = watch.get(event, [])
             fresh = quotes and now-quotes[-1][0] <= STALE_QUOTES
             pick = rules.favourite(quotes) if status in rules.DIP_LIVE and fresh else None
-            low = False                                # simulated only: qualifying favourites a little under 90c
-            if not pick and status in rules.DIP_LIVE and fresh and DIPS[series][0] == "tennis" and rules.qualifying(m) == "first":
-                pick = rules.favourite(quotes, rules.DIP_LOW)
-                low = bool(pick)
+            low = ()                                   # simulated only: favourites at 80-90c, bids set below the price
+            if not pick and status in rules.DIP_LIVE and fresh:
+                family = DIPS[series][0]
+                low = LOW.get(family, ()) if family != "tennis" or rules.qualifying(m) == "first" else ()
+                pick = rules.favourite(quotes, rules.DIP_FLOOR) if low else None
             # Buy the favourite as NO on the underdog's market when there is one: it carries most of the
             # trading and prints the dip first. The pre-match price still comes from the first-listed market.
             target, side = m, pick and pick[0]
@@ -294,20 +296,26 @@ class Trader:
             if not pick:
                 continue                               # not live, or no stable favourite at 90c+
             start = pick[1]
+            prefix, tier = DIPS[series]
+            stage = rules.qualifying(m) if prefix == "tennis" else None
+            where = dict(kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
+                         ask_when_placed=book["ask"], round=f"qualifying, {stage} round" if stage else "main draw")
+            if low:                                    # never real: these rows only record what would have filled
+                bids = {f"{prefix}_low_rel{depth}": math.floor(start)-depth for depth in low}
+                if prefix == "tennis" and start >= rules.DIP_LOW:
+                    bids["tennis_dip_low"] = rules.DIP_BID
+                for rule, price in bids.items():
+                    if book["ask"] is not None and book["ask"] > price:
+                        self.order(now, rule=rule, price=price, tier="simulated", **where)
+                continue
             if book["ask"] is None or book["ask"] <= rules.DIP_BID:
                 self.log("skip", event=event, why="price already at the bid", ask=book["ask"])
                 continue
-            prefix, tier = DIPS[series]
-            stage = rules.qualifying(m) if prefix == "tennis" else None
             if stage == "first":
                 tier = "validated"                     # first-round qualifying is supported on every tour
             elif prefix == "tennis" and tier == "validated":
                 tier = "later-qualifying" if stage else "main-draw"
-            common = dict(tier=tier, kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
-                          ask_when_placed=book["ask"], round=f"qualifying, {stage} round" if stage else "main draw")
-            if low:
-                self.order(now, rule="tennis_dip_low", price=rules.DIP_BID, **dict(common, tier="simulated"))
-                continue
+            common = dict(tier=tier, **where)
             self.send(self.order(now, rule=f"{prefix}_dip", price=rules.DIP_BID, **common))
             near = math.floor(start)-rules.DIP_RELATIVE     # simulated only: a bid set relative to the pre-match price
             if near != rules.DIP_BID and book["ask"] > near:

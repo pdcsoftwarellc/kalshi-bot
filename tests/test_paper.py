@@ -501,6 +501,24 @@ def test_qualifying_favourite_just_under_ninety_gets_a_paper_bid_only(tmp_path):
         trader.step(T0+20*i)
     api.states[event] = dict(status="live")
     trader.step(T0+260)
+    orders = {o["rule"]: o for o in trader.state["orders"]}
+    assert {r: (o["tier"], o["price"], o["start"]) for r, o in orders.items()} == {
+        "tennis_low_rel10": ("simulated", 77, 87.0), "tennis_low_rel20": ("simulated", 67, 87.0),
+        "tennis_dip_low": ("simulated", 80, 87.0)}
+    assert not broker.sent
+
+
+def test_womens_favourite_at_eighty_to_ninety_gets_one_paper_bid_only(tmp_path):
+    event, ticker = "KXNCAAWBGAME-26NOV18AAABBB", "KXNCAAWBGAME-26NOV18AAABBB-AAA"
+    api, broker = FakeApi(), FakeBroker()
+    api.listing[ticker] = market(ticker, 83, 85)
+    api.states[event] = dict(status="not_started")
+    api.books[ticker] = book(83, 85)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="live")
+    trader.step(T0+260)
     (order,) = trader.state["orders"]
-    assert (order["rule"], order["tier"], order["price"], order["start"]) == ("tennis_dip_low", "simulated", 80, 87.0)
+    assert (order["rule"], order["tier"], order["price"], order["start"]) == ("wcbb_low_rel15", "simulated", 69, 84.0)
     assert not broker.sent

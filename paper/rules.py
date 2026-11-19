@@ -16,6 +16,7 @@ DIP_LIVE = {"live", "inprogress"}
 DONE = {"closed", "ended", "complete", "finished", "final", "cancelled", "canceled"}
 
 DIP_START, DIP_BID, DIP_RELATIVE, DIP_DEEP, DIP_HIGH, DIP_LOW = 90, 80, 10, 65, 85, 85
+DIP_FLOOR = 80                                     # simulated only: favourites at 80-90c before play
 MIN_QUOTES, KEEP_QUOTES, MIN_SPAN, MAX_SPREAD, MAX_RANGE = 10, 15, 180, 4, 3
 NBA_BAND, NBA_MIN_LEAD = (97, 99), 6
 

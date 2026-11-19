@@ -169,6 +169,7 @@ def test_nba_take_and_rest(tmp_path):
 
 class FakeBroker:
     contracts, max_exposure, max_loss, rules = 5, 10, 30, ("tennis_dip", "cbb_dip", "nba_take")
+    max_trial = 6
 
     def __init__(self):
         self.sent, self.fills = [], {}
@@ -522,3 +523,22 @@ def test_womens_favourite_at_eighty_to_ninety_gets_one_paper_bid_only(tmp_path):
     (order,) = trader.state["orders"]
     assert (order["rule"], order["tier"], order["price"], order["start"]) == ("wcbb_low_rel15", "simulated", 69, 84.0)
     assert not broker.sent
+
+
+def test_trial_rules_send_real_orders_within_their_own_budget(tmp_path):
+    event, ticker = "KXATPCHALLENGERMATCH-26NOV18AAABBB", "KXATPCHALLENGERMATCH-26NOV18AAABBB-AAA"
+    api, broker = FakeApi(), FakeBroker()
+    broker.rules = ("tennis_dip", "tennis_low_rel10", "tennis_low_rel20")
+    api.listing[ticker] = dict(market(ticker, 86, 88), rules_primary="... Kobe Qualification Round 1 ...")
+    api.states[event] = dict(status="not_started")
+    api.books[ticker] = book(86, 88)
+    trader = Trader(api, tmp_path, broker)
+    for i in range(12):
+        trader.step(T0+20*i)
+    api.states[event] = dict(status="live")
+    trader.step(T0+260)
+    live = {o["rule"]: "order_id" in (o.get("live") or {}) for o in trader.state["orders"]}
+    # 5 contracts at 77c is $3.85 of the $6 trial budget; the 67c bid would take it past $6; the 80c row stays on paper
+    assert live == {"tennis_low_rel10": True, "tennis_low_rel20": False, "tennis_dip_low": False}
+    assert broker.sent == [(ticker, "yes", 77, 5, True)]
+    assert trader.exposure() == 0 and trader.exposure(trial=True) == 3.85

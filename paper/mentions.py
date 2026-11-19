@@ -26,10 +26,11 @@ and YES is priced 20-80c, for at most five words per event. The mirror is
 never real. New real orders stop at --max-exposure, at --max-loss, or while a
 file named STOP exists in the state folder (the same file stops the trader).
 
-The same pair of simulated bids is placed on Netflix chart and reality TV
-markets (rules wide_no and wide_mirror), where research/resting_no_wide.py
-found the same pattern at small size. These are bid at first sight whatever
-their date, checked less often, and never real.
+The same pair of bids is placed on Netflix chart and reality TV markets
+(rules wide_no and wide_mirror), where research/resting_no_wide.py found the
+same pattern at small size. These are bid at first sight whatever their date
+and checked less often; with `--live` the NO bid is real under the same
+limits, and the mirror never is.
 
 It makes one public request every few seconds, so it can run beside the
 trader without crowding it. State is saved after every change.
@@ -185,7 +186,7 @@ class Mentions:
                                              event=item["event"], day=item["day"], side=side, price=bid, spread=100-yes-no,
                                              yes_mid=(yes+100-no)/2,
                                              placed=now, seen=now, polled=now, checked=0, status="open", size_through=0.0))
-            if rule == "mention_no":
+            if rule in ("mention_no", "wide_no"):
                 self.send(self.state["orders"][-1])
         self.done.add(ticker)
         del self.state["queue"][ticker]

@@ -96,16 +96,16 @@ place an order.
 | Tennis dip | Favourite at 90¢+ before play; an 80¢ bid from the first live pass, resting on the underdog's market | First-round qualifying only, on every tour |
 | Tennis dip variants | The same with the bid 10¢ below the pre-match price, at 65¢, and at 85¢ in first-round qualifying | No |
 | Tennis dip, 85–90¢ | First-round qualifying favourite at 85–90¢ before play: the 80¢ bid | No |
-| Tennis dip, 80–90¢ | First-round qualifying favourite at 80–90¢ before play: bids 10¢ and 20¢ below the pre-match price | No |
-| Women's college dip, 80–90¢ | Women's college favourite at 80–90¢ before play: a bid 15¢ below the pre-match price | No |
+| Tennis dip, 80–90¢ | First-round qualifying favourite at 80–90¢ before play: bids 10¢ and 20¢ below the pre-match price | Yes, trial budget |
+| Women's college dip, 80–90¢ | Women's college favourite at 80–90¢ before play: a bid 15¢ below the pre-match price | Yes, trial budget |
 | Tennis pre-match | Buy a qualifying-round favourite at 90¢+ at the ask before play | No |
 | NBA late favourite | Fourth quarter or overtime, leader ahead by 6+, ask 97–99¢: buy at the ask, or bid 1¢ below | Only with `--live-rules tennis_dip nba_take` |
 | College basketball dip | The three tennis dip bids on men's college games | The 80¢ bid only |
 | Women's college basketball dip | The same three bids on women's college games | The 80¢ bid only |
 | NBA and college volleyball dips | The same three bids on NBA pre-game favourites and women's college volleyball | No |
-| College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | No |
+| College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | Yes, trial budget |
 | Ladder and just-in-time rows | For every dip family: bids at 75¢, 70¢ and 60¢, and the 80¢ bid placed only once the ask falls to 88¢. `report` also shows the 80¢ bid's return at 300 contracts with fills limited to the first 20 minutes | The just-in-time bid only, in men's college basketball and first-round qualifying tennis, as a second order beside the resting one |
-| Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | No |
+| Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | Yes, trial budget |
 
 Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and
 reported as separate rows.
@@ -137,8 +137,10 @@ already on the exchange stay there until the match ends or they are cancelled by
   NO bid is also a real post-only order when the market is not a sports broadcast and YES is
   priced 20–80¢, for at most five words per event (`--contracts 3 --max-exposure 25
   --max-loss 15` by default). The `STOP` file stops it too.
-  It places the same simulated pair on Netflix chart and reality TV markets (`wide_no`,
-  `wide_mirror`); those are never real.
+  It places the same pair on Netflix chart and reality TV markets (`wide_no`,
+  `wide_mirror`); the NO bid is real under the same limits, the mirror never is.
+- Trial rules are unproven rules trading real money at the smallest size. They have their own
+  cap (`--max-trial-exposure 20`), so they cannot use the cash of the proven rules.
 - `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
   mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both

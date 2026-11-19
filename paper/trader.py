@@ -80,11 +80,12 @@ DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis"
         "KXNCAAMBGAME": ("cbb", "validated"),
         "KXNCAAWBGAME": ("wcbb", "validated"), "KXNBAGAME": ("nba", "simulated"),
         "KXNCAAWVMATCH": ("vball", "simulated")}
-LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip", "tennis_dip_jit", "cbb_dip_jit")       # sent as real orders unless --live-rules says otherwise
+TRIAL_RULES = ("tennis_low_rel10", "tennis_low_rel20", "wcbb_low_rel15", "cbb_underdog")   # real at the smallest size, on their own budget
+LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip", "tennis_dip_jit", "cbb_dip_jit", *TRIAL_RULES)       # sent as real orders unless --live-rules says otherwise
 LADDER = (75, 70, 60)                         # simulated lower rungs; 65c is the "deep" row
 WINDOW, SIZED, SHARE = 1200, 300, .25         # fill window after the first print; order size and share of prints for sized returns
 UNDERDOG = (35, 50)                             # men's college basketball underdogs bought on paper before the start
-LOW = {"tennis": (10, 20), "wcbb": (15,)}       # simulated only: cents below the pre-match price, for 80-90c favourites
+LOW = {"tennis": (10, 20), "wcbb": (15,)}       # trial rules: cents below the pre-match price, for 80-90c favourites
 NBA = "KXNBAGAME"
 BASKET, BASKET_LEAD = ("cbb", "wcbb", "nba"), 600     # families bought before the start, and how long before
 SLOW_POLL, NEAR, STALE_QUOTES, SETTLE_POLL, HORIZON = 300, 8, 600, 60, 12*3600
@@ -200,12 +201,12 @@ class Trader:
 
     # ---- live orders -------------------------------------------------------------------------
 
-    def exposure(self):
-        """Dollars committed to live orders that have not settled, counting resting orders in full."""
+    def exposure(self, trial=False):
+        """Dollars committed to unsettled live orders of the proven rules (or the trial rules), resting orders in full."""
         total = 0.0
         for o in self.state["orders"]:
             live = o.get("live") or {}
-            if "order_id" in live and "pnl" not in live:
+            if "order_id" in live and "pnl" not in live and (o["rule"] in TRIAL_RULES) == trial:
                 total += (live["count"] if o["kind"] == "rest" and o["status"] in ("open", "filled") else live["filled"])*o["price"]/100
         return total
 
@@ -214,13 +215,15 @@ class Trader:
 
     def send(self, o, available=None):
         """Place the real order behind a simulated one, when live trading is on and the limits allow."""
-        if not self.broker or o["tier"] != "validated" or o["rule"] not in self.broker.rules:   # all else is simulated
-            return
+        trial = o["rule"] in TRIAL_RULES                # unproven rules: real, but they cannot use the proven rules' cash
+        if not self.broker or o["rule"] not in self.broker.rules or not (trial or o["tier"] == "validated"):
+            return                                     # all else is simulated
         count = self.broker.contracts if available is None else min(self.broker.contracts, int(available))
         cost = count*o["price"]/100
+        room = self.broker.max_trial if trial else self.broker.max_exposure
         why = ("STOP file present" if (self.out/"STOP").exists()
                else "loss limit reached" if self.realized() <= -self.broker.max_loss
-               else "exposure limit" if self.exposure()+cost > self.broker.max_exposure
+               else "exposure limit" if self.exposure(trial)+cost > room
                else "nothing displayed" if count < 1 else None)
         if why:
             self.log("live_skip", id=o["id"], event=o["event"], why=why)
@@ -276,7 +279,7 @@ class Trader:
             quotes = watch.get(event, [])
             fresh = quotes and now-quotes[-1][0] <= STALE_QUOTES
             pick = rules.favourite(quotes) if status in rules.DIP_LIVE and fresh else None
-            low = ()                                   # simulated only: favourites at 80-90c, bids set below the price
+            low = ()                                   # trial rules: favourites at 80-90c, bids set below the price
             if not pick and status in rules.DIP_LIVE and fresh:
                 family = DIPS[series][0]
                 low = LOW.get(family, ()) if family != "tennis" or rules.qualifying(m) == "first" else ()
@@ -300,13 +303,13 @@ class Trader:
             stage = rules.qualifying(m) if prefix == "tennis" else None
             where = dict(kind="rest", event=event, ticker=target["ticker"], side=side, start=start,
                          ask_when_placed=book["ask"], round=f"qualifying, {stage} round" if stage else "main draw")
-            if low:                                    # never real: these rows only record what would have filled
+            if low:
                 bids = {f"{prefix}_low_rel{depth}": math.floor(start)-depth for depth in low}
                 if prefix == "tennis" and start >= rules.DIP_LOW:
                     bids["tennis_dip_low"] = rules.DIP_BID
                 for rule, price in bids.items():
                     if book["ask"] is not None and book["ask"] > price:
-                        self.order(now, rule=rule, price=price, tier="simulated", **where)
+                        self.send(self.order(now, rule=rule, price=price, tier="simulated", **where))   # real only for trial rules
                 continue
             if book["ask"] is None or book["ask"] <= rules.DIP_BID:
                 self.log("skip", event=event, why="price already at the bid", ask=book["ask"])
@@ -369,7 +372,7 @@ class Trader:
         o.update(status="filled", filled_at=now, size=book["ask_size"])
 
     def underdog(self, event, m, now):
-        """Simulated only: buy a men's college basketball underdog priced 35-50c at the ask, just before the start.
+        """A trial rule: buy a men's college basketball underdog priced 35-50c at the ask, just before the start.
 
         research/college_sports.py saw these win more often than their price, but not by enough to pass.
         """
@@ -384,6 +387,7 @@ class Trader:
                 o = self.order(now, rule="cbb_underdog", tier="simulated", kind="take", event=event, ticker=m["ticker"],
                                side=side, price=book["ask"], start=price)
                 o.update(status="filled", filled_at=now, size=book["ask_size"])
+                self.send(o, available=book["ask_size"])
         self.handled.add(key)
 
     def nba(self, markets, live, now):
@@ -689,6 +693,7 @@ def main():
     parser.add_argument("--live", action="store_true", help="also place real orders on the production account")
     parser.add_argument("--contracts", type=int, default=3, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
+    parser.add_argument("--max-trial-exposure", type=float, default=20, help="dollars in unsettled live orders of the trial rules")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
     parser.add_argument("--no-stream", action="store_true", help="do not use the live price stream; poll only")
     parser.add_argument("--live-rules", nargs="+", choices=(*LIVE_RULES, "nba_take"), default=list(LIVE_RULES),
@@ -699,9 +704,9 @@ def main():
         return
     broker = None
     if args.live:
-        broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules)
+        broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules, args.max_trial_exposure)
         print(f"LIVE ({', '.join(args.live_rules)}): real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
-              f"an order, at most ${args.max_exposure:.0f} unsettled, stop after ${args.max_loss:.0f} lost", flush=True)
+              f"an order, at most ${args.max_exposure:.0f} unsettled (${args.max_trial_exposure:.0f} more for trial rules), stop after ${args.max_loss:.0f} lost", flush=True)
     stream = None
     if not args.no_stream and config.KALSHI_API_KEY and config.KALSHI_PRIVATE_KEY_PATH:
         stream = Stream()

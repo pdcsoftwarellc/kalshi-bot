@@ -26,11 +26,15 @@ def qualifying(market):
 
     Read from the market's rules text ("... Qualification Round 1 ...", "... Qualification Final ...").
     "Qualifiers" is not qualifying: it names team ties such as the Billie Jean King Cup Qualifiers.
+    A plain "Qualification" with no round is a first round (149 of 157 in the archive); a plain
+    "Qualifying" is a qualifying final (5 of 5), so it counts as later.
     """
-    found = re.search(r"\bQualif(?:ication|ying)\b( Final| Round (\d+))?", market.get("rules_primary") or "")
+    found = re.search(r"\bQualif(ication|ying)\b( Final| Round (\d+))?", market.get("rules_primary") or "")
     if not found:
         return None
-    return "first" if found.group(1) is None or found.group(2) == "1" else "later"
+    if found.group(2) is None:
+        return "first" if found.group(1) == "ication" else "later"
+    return "first" if found.group(3) == "1" else "later"
 
 
 def top(book):

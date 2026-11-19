@@ -478,10 +478,16 @@ def halves(r, mask):
     return mask & first, mask & ~first
 
 
+SEED = 31
+
+
 def line(r, mask, least=20):
+    """One row of results. The bootstrap generator is re-seeded here, so the intervals of a row depend only on its mask, never on what was
+    computed before it: the same cell gives the same interval in every run and in every place it is asked for."""
     n = int(mask.sum())
     if n < least:
         return None
+    resting_no.RNG = np.random.default_rng(SEED)
     one = np.ones(len(mask))
     f, yf = mask & r["filled"], mask & r["yfilled"]
     o = dict(orders=n, markets=len(set(r["ticker"][mask])), events=len(set(r["g"][mask])), days=len(set(r["d"][mask])), fills=int(f.sum()), mirror_fills=int(yf.sum()),
@@ -510,9 +516,11 @@ def text(label, o):
             f"{show(o.get('diff'))} | {show(o['gap'])}")
 
 
-def verdict(r, mask):
-    """The pass rule. Returns (passed, reason, halves)."""
-    o = line(r, mask, 1)
+def verdict(r, mask, o=None):
+    """The pass rule. Returns (passed, reason, halves). `o` is the row already computed (and printed) for the mask: the verdict reads the
+    interval from it rather than drawing a second bootstrap, so the printed interval and the PASS/FAIL cannot disagree."""
+    if o is None:
+        o = line(r, mask, 1)
     hs = [line(r, h, 1) for h in halves(r, mask)]
     if o is None or "net" not in o or "mirror_net" not in o:
         return None, "too few fills", hs
@@ -667,7 +675,7 @@ def report():
                 say(f"  {fam:40} {int(base.sum()):5}   under 20 orders")
                 continue
             say("  "+text(fam, o))
-            ok, why, hs = verdict(r, base)
+            ok, why, hs = verdict(r, base, o)
             for k, h in enumerate(hs):
                 if h is not None:
                     say("  "+text(f"    half {k+1}", h))

@@ -59,6 +59,10 @@ at most 3c; start = expected expiration minus three hours), reads ESPN's opening
 to data/processed/outside-lines/forward.json. Games already in that file are not read again. One difference from
 `report`: its rows also required a clean quote three hours before the game (research/favourite_contexts.py); `forward`
 looks only at the quotes before the tip, as a live rule would.
+Rule B (pre-registered 2026-11-19, logged beside the residual rule, history not rescored): the spread moved against the
+favourite from open to close. The close is only known at the tip, so it is also scored on the last pre-tip scoreboard
+line this script saved, where there is one. Opening spreads that have the favourite as underdog while the close has it
+a heavy favourite are flagged as likely sign errors.
 Look-ahead guard: ESPN's archive gives the opening spread without the time it was posted. So every run also saves the
 opening spread ESPN's scoreboard shows for games that have NOT started yet (today and tomorrow), with the time seen; a
 kept game is later marked "seen before the tip" only when such a snapshot exists. Run it before the tips for that.
@@ -671,6 +675,7 @@ FROZEN = dict(
     freeze=1794974400,                    # latest men's game start in matched.json (2026-11-18 04:00 UTC); only later starts count
 )
 SERIES, KALSHI_PACE = "KXNCAAMBGAME", 2.5
+SUSPECT_CLOSE = 10.0      # an opening spread with the favourite as underdog is flagged when the close has it favoured by this many points
 FORWARD = OUT/"forward.json"
 kalshi_last = [0.0]
 
@@ -786,11 +791,15 @@ def forward(minutes):
             for e in (data or {}).get("events") or []:
                 c = e["competitions"][0]
                 odds = (c.get("odds") or [None])[0]
-                if e["status"]["type"]["name"] != "STATUS_SCHEDULED" or stamp(e["date"]) <= now.timestamp() or not odds or e["id"] in snaps:
+                if e["status"]["type"]["name"] != "STATUS_SCHEDULED" or stamp(e["date"]) <= now.timestamp() or not odds:
                     continue
                 home = ((odds.get("pointSpread") or {}).get("home") or {})
                 opened, current = (home.get("open") or {}).get("line"), (home.get("close") or {}).get("line")
                 if opened is None and current is None:
+                    continue
+                if e["id"] in snaps:        # keep the first sighting; refresh the LAST pre-tip line (rule B's usable "close")
+                    snaps[e["id"]].update(last_seen_at=now.isoformat(timespec="seconds"), home_last=current, tip=e["date"])
+                    count["pre-tip snapshots refreshed"] += 1
                     continue
                 snaps[e["id"]] = dict(seen_at=now.isoformat(timespec="seconds"), tip=e["date"], home_open=opened, home_current=current,
                                       provider=(odds.get("provider") or {}).get("name"))
@@ -908,31 +917,109 @@ def forward(minutes):
     print(f"  NO OPENING SPREAD (not in the test) {side_text(no_line)}")
     history = [r for r in json.loads((OUT/'matched.json').read_text()) if r["league"] == "men" and 90 <= r["mid"] < 99 and r.get("p_open") is not None
                and r["p_open"]-np.polyval(FROZEN["fit"], r["mid"]) >= FROZEN["threshold"]] if (OUT/"matched.json").exists() else []
-    for label, rows in (("forward kept bets", kept), ("the rule's historical bets (price only; outcomes not used)", history)):
-        if not rows:
-            continue
-        even = float(np.mean([r["ask"]+fee(r["ask"]) for r in rows]))/100
-        need = math.ceil(math.log(0.05)/math.log(even))
-        text = f"  break-even win rate at the mean ask plus fee of {label}: {100*even:.2f}% -> {need} kept bets in a row with no loss for a one-sided p < 0.05"
-        with_one = next(n for n in range(need, 2000) if binomial_tail(n, n-1, even) < 0.05)
-        print(text+f"; with one loss, {with_one} bets")
-    if kept:
-        even = float(np.mean([r["ask"]+fee(r["ask"]) for r in kept]))/100
-        wins = sum(r["payout"] == 1.0 for r in kept)
-        print(f"  one-sided binomial p-value, kept: P(at least {wins} wins in {len(kept)} | break-even {100*even:.2f}%) = {binomial_tail(len(kept), wins, even):.3f}")
+
+    def verdict(name, rows, past=None):
+        """Break-even win rate, the run needed, and the one-sided binomial p-value of a kept set."""
+        for label, part in ((f"forward {name} bets", rows), (f"{name}'s historical bets (price only; outcomes not used)", past)):
+            if not part:
+                continue
+            even = float(np.mean([r["ask"]+fee(r["ask"]) for r in part]))/100
+            need = math.ceil(math.log(0.05)/math.log(even))
+            with_one = next(n for n in range(need, 2000) if binomial_tail(n, n-1, even) < 0.05)
+            print(f"  break-even win rate at the mean ask plus fee of {label}: {100*even:.2f}% -> {need} kept bets in a row with no loss for a one-sided p < 0.05; with one loss, {with_one} bets")
+        if rows:
+            even = float(np.mean([r["ask"]+fee(r["ask"]) for r in rows]))/100
+            wins = sum(r["payout"] == 1.0 for r in rows)
+            print(f"  one-sided binomial p-value, {name}: P(at least {wins} wins in {len(rows)} | break-even {100*even:.2f}%) = {binomial_tail(len(rows), wins, even):.3f}")
+
+    def number(text):
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0 if str(text).upper() in ("PK", "EVEN", "PICK") else None
+
+    # per-game fields worked out at print time from what is stored (forward games only; history is not rescored)
+    for g in judged:
+        o, c = g.get("open"), g.get("close")
+        g["suspect"] = o is not None and c is not None and o < 0 and c >= SUSPECT_CLOSE
+        g["b"] = None if o is None or c is None else bool(c < o)
+        snap = snaps.get(g.get("espn"))
+        g["b_pretip"], g["pretip"] = None, None
+        if snap and stamp(snap.get("last_seen_at") or snap["seen_at"]) < stamp(g["espn_tip"]):
+            first, last = number(snap.get("home_open")), number(snap.get("home_last", snap.get("home_current")))
+            if first is not None and last is not None:
+                sign = -1 if g["fav_home"] else 1
+                seen = snap.get("last_seen_at") or snap["seen_at"]
+                g["pretip"] = dict(open=sign*first, last=sign*last, seen_at=seen, hours_before=round((stamp(g["espn_tip"])-stamp(seen))/3600, 1))
+                g["b_pretip"] = bool(sign*last < sign*first)
+
+    verdict("rule A", kept, history)
     seen = sum(bool(g.get("open_seen_before_tip")) for g in kept)
     print(f"  look-ahead guard: {seen} of {len(kept)} kept games had their opening spread saved from ESPN's scoreboard BEFORE the tip. For the others it cannot be told:"
           " ESPN's archive gives the opening spread with no time stamp. Run this command before the day's tips to record it.")
-    print(f"  kept games ({len(kept)}):")
+    print(f"  rule A kept games ({len(kept)}):")
     print(f"    {'date':10s} {'favourite':24s} {'opponent':24s} {'ask':>5s} {'open':>6s} {'resid':>6s} {'result':6s} open seen before the tip?")
     for g in kept:
-        s = g.get("open_seen_before_tip")
-        guard = f"yes, {s['hours_before']}h before ({s['open_then']:+.1f}{'' if s['same_as_archive'] else ', DIFFERS from the archive'})" if s else "cannot tell (no pre-tip snapshot)"
-        print(f"    {g['day']:10s} {g['fav'][:24]:24s} {g['opp'][:24]:24s} {g['ask']:5.1f} {-g['open']:+6.1f} {g['residual']:+6.2f} {'won' if g['payout'] == 1.0 else 'LOST':6s} {guard}")
+        x = g.get("open_seen_before_tip")
+        guard = f"yes, {x['hours_before']}h before ({x['open_then']:+.1f}{'' if x['same_as_archive'] else ', DIFFERS from the archive'})" if x else "cannot tell (no pre-tip snapshot)"
+        print(f"    {g['day']:10s} {g['fav'][:24]:24s} {g['opp'][:24]:24s} {g['ask']:5.1f} {-g['open']:+6.1f} {g['residual']:+6.2f} {'won' if g['payout'] == 1.0 else 'LOST':6s} {guard}"
+              f"{'  SUSPECT OPEN SIGN' if g['suspect'] else ''}")
     lost = [g for g in dropped if g["payout"] != 1.0]
     if lost:
-        print("  dropped games that lost: "+"; ".join(f"{g['day']} {g['fav']} ask {g['ask']:.1f} open {-g['open']:+.1f} resid {g['residual']:+.2f}" for g in lost))
-    print(f"  saved {FORWARD}")
+        print("  rule A dropped games that lost: "+"; ".join(f"{g['day']} {g['fav']} ask {g['ask']:.1f} open {-g['open']:+.1f} resid {g['residual']:+.2f}" for g in lost))
+
+    print("\nRULE B, frozen 2026-11-19 (pre-registered; history is not rescored here): men's 90-99c favourites whose spread moved AGAINST the favourite from open to"
+          " close (the favourite is favoured by fewer points at the close than at the open). Same games and prices as rule A.")
+    print("  The closing spread is only known at the tip. 'archive' scores the rule on ESPN's archived close (not knowable in time); 'pre-tip' scores it on the LAST"
+          " spread this script saved from ESPN's scoreboard before the tip, for the games where it saved one.")
+    both = [g for g in judged if g["b"] is not None]
+    b_kept, b_rest = [g for g in both if g["b"]], [g for g in both if not g["b"]]
+    print(f"  archive  KEPT (moved against)  {side_text(b_kept)}")
+    print(f"  archive  REST (flat or toward) {side_text(b_rest)}")
+    print(f"  archive  no open or no close (not in the test) n {len(judged)-len(both)}")
+    verdict("rule B (archive close)", b_kept)
+    pre = [g for g in judged if g["b_pretip"] is not None]
+    p_kept, p_rest = [g for g in pre if g["b_pretip"]], [g for g in pre if not g["b_pretip"]]
+    print(f"  pre-tip  games with a snapshot before the tip: {len(pre)} of {len(judged)}"+("" if pre else " (none yet: snapshots exist only for games that had not started when this command ran)"))
+    print(f"  pre-tip  KEPT (moved against)  {side_text(p_kept)}")
+    print(f"  pre-tip  REST (flat or toward) {side_text(p_rest)}")
+    verdict("rule B (pre-tip snapshot)", p_kept)
+    if pre:
+        print(f"  pre-tip and archive versions agree on {sum(g['b_pretip'] == g['b'] for g in pre if g['b'] is not None)} of {sum(g['b'] is not None for g in pre)} games")
+    print(f"  rule B kept games, archive close ({len(b_kept)}):")
+    print(f"    {'date':10s} {'favourite':24s} {'opponent':24s} {'ask':>5s} {'open':>6s} {'close':>6s} {'result':6s} {'rule A':7s} last pre-tip snapshot")
+    for g in b_kept:
+        x = g["pretip"]
+        guard = f"open {-x['open']:+.1f} last {-x['last']:+.1f}, {x['hours_before']}h before -> {'kept' if g['b_pretip'] else 'NOT kept'}" if x else "none (cannot be scored pre-tip)"
+        print(f"    {g['day']:10s} {g['fav'][:24]:24s} {g['opp'][:24]:24s} {g['ask']:5.1f} {-g['open']:+6.1f} {-g['close']:+6.1f} {'won' if g['payout'] == 1.0 else 'LOST':6s} "
+              f"{'kept' if g['kept'] else 'dropped':7s} {guard}{'  SUSPECT OPEN SIGN' if g['suspect'] else ''}")
+    lost = [g for g in b_rest if g["payout"] != 1.0]
+    if lost:
+        print("  rule B rest games that lost: "+"; ".join(f"{g['day']} {g['fav']} ask {g['ask']:.1f} open {-g['open']:+.1f} close {-g['close']:+.1f}" for g in lost))
+
+    print("\nRULE A x RULE B (archive close), games with both an opening and a closing spread")
+    for a_name, a_test in (("A kept   ", True), ("A dropped", False)):
+        for b_name, b_test in (("B kept", True), ("B rest", False)):
+            print(f"  {a_name} / {b_name}  {side_text([g for g in both if g['kept'] is a_test and g['b'] is b_test])}")
+
+    suspects = [g for g in judged if g["suspect"]]
+    print(f"\nSUSPECT OPENING SPREADS (ESPN's open has the Kalshi favourite as the UNDERDOG while its close has it favoured by {SUSPECT_CLOSE:g}+ points; likely a sign error): {len(suspects)}")
+    for g in suspects:
+        print(f"    {g['day']} {g['fav']} v {g['opp']}: ask {g['ask']:.1f} open {-g['open']:+.1f} close {-g['close']:+.1f} | rule A {'kept' if g['kept'] else 'dropped'}, "
+              f"rule B {'kept' if g['b'] else 'rest'}, {'won' if g['payout'] == 1.0 else 'LOST'}")
+    if suspects:
+        clean = [g for g in judged if not g["suspect"]]
+        print("  the same blocks WITHOUT the suspect games:")
+        print(f"    rule A KEPT    {side_text([g for g in clean if g['kept']])}")
+        print(f"    rule A DROPPED {side_text([g for g in clean if g['kept'] is False])}")
+        print(f"    rule B KEPT    {side_text([g for g in clean if g['b']])}")
+        print(f"    rule B REST    {side_text([g for g in clean if g['b'] is False])}")
+    else:
+        print("  none among the forward games so far; the rule blocks above use every game")
+    for g in judged:      # print-time fields are not part of the stored record, except the rule B verdicts, kept for the log
+        g.pop("pretip", None)
+    save()
+    print(f"\n  saved {FORWARD}")
 
 
 def main():

@@ -227,7 +227,8 @@ class Trader:
         trial = budget != "proven"
         if not self.broker or o["rule"] not in self.broker.rules or not (trial or o["tier"] == "validated"):
             return                                     # all else is simulated
-        count = self.broker.contracts if available is None else min(self.broker.contracts, int(available))
+        size = self.broker.contracts if trial else getattr(self.broker, "sizes", {}).get(o["rule"].split("_")[0], self.broker.contracts)
+        count = size if available is None else min(size, int(available))
         cost = count*o["price"]/100
         room = dict(proven=self.broker.max_exposure, trial=self.broker.max_trial, underdog=self.broker.max_underdog)[budget]
         why = ("STOP file present" if (self.out/"STOP").exists()
@@ -701,6 +702,8 @@ def main():
     parser.add_argument("--dir", default=str(OUT), help="where state and the journal are kept")
     parser.add_argument("--live", action="store_true", help="also place real orders on the production account")
     parser.add_argument("--contracts", type=int, default=3, help="contracts per live order")
+    parser.add_argument("--size", action="append", default=[], metavar="FAMILY=N",
+                        help="contracts per live order for one proven family (tennis, cbb, wcbb); trial rules keep --contracts")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
     parser.add_argument("--max-underdog-exposure", type=float, default=20, help="dollars in unsettled live underdog orders")
     parser.add_argument("--max-trial-exposure", type=float, default=20, help="dollars in unsettled live orders of the trial rules")
@@ -715,8 +718,11 @@ def main():
     broker = None
     if args.live:
         broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules, args.max_trial_exposure, args.max_underdog_exposure)
+        broker.sizes = {family: int(n) for family, n in (item.split("=") for item in args.size)}
+        if set(broker.sizes) - {"tennis", "cbb", "wcbb"}:
+            parser.error("--size families are tennis, cbb and wcbb")
         print(f"LIVE ({', '.join(args.live_rules)}): real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
-              f"an order, at most ${args.max_exposure:.0f} unsettled (${args.max_trial_exposure:.0f} more for trial rules, ${args.max_underdog_exposure:.0f} more for underdogs), stop after ${args.max_loss:.0f} lost", flush=True)
+              f"an order{''.join(f', {n} for {f}' for f, n in broker.sizes.items())}, at most ${args.max_exposure:.0f} unsettled (${args.max_trial_exposure:.0f} more for trial rules, ${args.max_underdog_exposure:.0f} more for underdogs), stop after ${args.max_loss:.0f} lost", flush=True)
     stream = None
     if not args.no_stream and config.KALSHI_API_KEY and config.KALSHI_PRIVATE_KEY_PATH:
         stream = Stream()

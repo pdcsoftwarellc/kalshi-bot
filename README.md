@@ -142,6 +142,8 @@ already on the exchange stay there until the match ends or they are cancelled by
 - Trial rules are unproven rules trading real money at the smallest size. They have their own
   cap (`--max-trial-exposure 20`), so they cannot use the cash of the proven rules. The underdog
   rule fires on many games a night, so it has a cap of its own (`--max-underdog-exposure 20`).
+- `--contracts` sizes every live order. `--size cbb=30 --size wcbb=10 --size tennis=60` sets a
+  larger size for one proven family; trial rules always keep `--contracts`.
 - `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
   mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both

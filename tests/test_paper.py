@@ -549,3 +549,14 @@ def test_trial_rules_send_real_orders_within_their_own_budget(tmp_path):
 def test_underdog_draws_on_its_own_budget():
     from paper.trader import budget_of
     assert [budget_of(r) for r in ("cbb_dip", "wcbb_low_rel15", "cbb_underdog")] == ["proven", "trial", "underdog"]
+
+
+def test_proven_families_can_have_their_own_size(tmp_path):
+    trader, broker = Trader(FakeApi(), tmp_path, FakeBroker()), FakeBroker()
+    broker.rules, broker.max_exposure, broker.sizes = ("cbb_dip", "cbb_underdog"), 100, {"cbb": 30}
+    trader.broker = broker
+    dip = trader.order(T0, rule="cbb_dip", tier="validated", kind="rest", event="E1", ticker="E1-A", side="no", price=80)
+    dog = trader.order(T0, rule="cbb_underdog", tier="simulated", kind="take", event="E2", ticker="E2-A", side="yes", price=40)
+    trader.send(dip)
+    trader.send(dog, available=100)
+    assert [s[3] for s in broker.sent] == [30, 5]     # the underdog is a trial rule and keeps the small size

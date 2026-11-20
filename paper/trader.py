@@ -81,7 +81,15 @@ DIPS = {"KXWTAMATCH": ("tennis", "validated"), "KXATPCHALLENGERMATCH": ("tennis"
         "KXNCAAWBGAME": ("wcbb", "validated"), "KXNBAGAME": ("nba", "simulated"),
         "KXNCAAWVMATCH": ("vball", "simulated")}
 TRIAL_RULES = ("tennis_low_rel10", "tennis_low_rel20", "wcbb_low_rel15", "cbb_underdog")   # real at the smallest size, on their own budget
+OWN_BUDGET = ("cbb_underdog",)                  # trial rules that fire often enough to crowd the others: capped apart
 LIVE_RULES = ("tennis_dip", "cbb_dip", "wcbb_dip", "tennis_dip_jit", "cbb_dip_jit", *TRIAL_RULES)       # sent as real orders unless --live-rules says otherwise
+
+
+def budget_of(rule):
+    """Which exposure cap a rule draws on: the proven rules', the trial rules', or the underdog rule's own."""
+    return "underdog" if rule in OWN_BUDGET else "trial" if rule in TRIAL_RULES else "proven"
+
+
 LADDER = (75, 70, 60)                         # simulated lower rungs; 65c is the "deep" row
 WINDOW, SIZED, SHARE = 1200, 300, .25         # fill window after the first print; order size and share of prints for sized returns
 UNDERDOG = (35, 50)                             # men's college basketball underdogs bought on paper before the start
@@ -201,12 +209,12 @@ class Trader:
 
     # ---- live orders -------------------------------------------------------------------------
 
-    def exposure(self, trial=False):
-        """Dollars committed to unsettled live orders of the proven rules (or the trial rules), resting orders in full."""
+    def exposure(self, budget="proven"):
+        """Dollars committed to unsettled live orders drawing on one budget, resting orders in full."""
         total = 0.0
         for o in self.state["orders"]:
             live = o.get("live") or {}
-            if "order_id" in live and "pnl" not in live and (o["rule"] in TRIAL_RULES) == trial:
+            if "order_id" in live and "pnl" not in live and budget_of(o["rule"]) == budget:
                 total += (live["count"] if o["kind"] == "rest" and o["status"] in ("open", "filled") else live["filled"])*o["price"]/100
         return total
 
@@ -215,15 +223,16 @@ class Trader:
 
     def send(self, o, available=None):
         """Place the real order behind a simulated one, when live trading is on and the limits allow."""
-        trial = o["rule"] in TRIAL_RULES                # unproven rules: real, but they cannot use the proven rules' cash
+        budget = budget_of(o["rule"])                   # unproven rules: real, but they cannot use the proven rules' cash
+        trial = budget != "proven"
         if not self.broker or o["rule"] not in self.broker.rules or not (trial or o["tier"] == "validated"):
             return                                     # all else is simulated
         count = self.broker.contracts if available is None else min(self.broker.contracts, int(available))
         cost = count*o["price"]/100
-        room = self.broker.max_trial if trial else self.broker.max_exposure
+        room = dict(proven=self.broker.max_exposure, trial=self.broker.max_trial, underdog=self.broker.max_underdog)[budget]
         why = ("STOP file present" if (self.out/"STOP").exists()
                else "loss limit reached" if self.realized() <= -self.broker.max_loss
-               else "exposure limit" if self.exposure(trial)+cost > room
+               else "exposure limit" if self.exposure(budget)+cost > room
                else "nothing displayed" if count < 1 else None)
         if why:
             self.log("live_skip", id=o["id"], event=o["event"], why=why)
@@ -693,6 +702,7 @@ def main():
     parser.add_argument("--live", action="store_true", help="also place real orders on the production account")
     parser.add_argument("--contracts", type=int, default=3, help="contracts per live order")
     parser.add_argument("--max-exposure", type=float, default=60, help="dollars in unsettled live orders")
+    parser.add_argument("--max-underdog-exposure", type=float, default=20, help="dollars in unsettled live underdog orders")
     parser.add_argument("--max-trial-exposure", type=float, default=20, help="dollars in unsettled live orders of the trial rules")
     parser.add_argument("--max-loss", type=float, default=30, help="settled live loss in dollars that stops new orders")
     parser.add_argument("--no-stream", action="store_true", help="do not use the live price stream; poll only")
@@ -704,9 +714,9 @@ def main():
         return
     broker = None
     if args.live:
-        broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules, args.max_trial_exposure)
+        broker = Broker(args.contracts, args.max_exposure, args.max_loss, args.live_rules, args.max_trial_exposure, args.max_underdog_exposure)
         print(f"LIVE ({', '.join(args.live_rules)}): real orders on the production account, balance ${broker.balance():.2f}; {args.contracts} contracts "
-              f"an order, at most ${args.max_exposure:.0f} unsettled (${args.max_trial_exposure:.0f} more for trial rules), stop after ${args.max_loss:.0f} lost", flush=True)
+              f"an order, at most ${args.max_exposure:.0f} unsettled (${args.max_trial_exposure:.0f} more for trial rules, ${args.max_underdog_exposure:.0f} more for underdogs), stop after ${args.max_loss:.0f} lost", flush=True)
     stream = None
     if not args.no_stream and config.KALSHI_API_KEY and config.KALSHI_PRIVATE_KEY_PATH:
         stream = Stream()

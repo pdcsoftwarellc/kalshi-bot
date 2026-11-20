@@ -170,6 +170,7 @@ def test_nba_take_and_rest(tmp_path):
 class FakeBroker:
     contracts, max_exposure, max_loss, rules = 5, 10, 30, ("tennis_dip", "cbb_dip", "nba_take")
     max_trial = 6
+    max_underdog = 6
 
     def __init__(self):
         self.sent, self.fills = [], {}
@@ -542,4 +543,9 @@ def test_trial_rules_send_real_orders_within_their_own_budget(tmp_path):
     # 5 contracts at 77c is $3.85 of the $6 trial budget; the 67c bid would take it past $6; the 80c row stays on paper
     assert live == {"tennis_low_rel10": True, "tennis_low_rel20": False, "tennis_dip_low": False}
     assert broker.sent == [(ticker, "yes", 77, 5, True)]
-    assert trader.exposure() == 0 and trader.exposure(trial=True) == 3.85
+    assert trader.exposure() == 0 and trader.exposure("trial") == 3.85
+
+
+def test_underdog_draws_on_its_own_budget():
+    from paper.trader import budget_of
+    assert [budget_of(r) for r in ("cbb_dip", "wcbb_low_rel15", "cbb_underdog")] == ["proven", "trial", "underdog"]

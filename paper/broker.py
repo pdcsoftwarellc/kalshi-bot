@@ -18,9 +18,10 @@ class BrokerError(RuntimeError):
 
 class Broker:
     def __init__(self, contracts, max_exposure, max_loss, rules=("tennis_dip", "cbb_dip", "wcbb_dip", "tennis_dip_jit", "cbb_dip_jit"),
-                 max_trial=0):
+                 max_trial=0, max_underdog=0):
         self.contracts, self.max_exposure, self.max_loss, self.rules = contracts, max_exposure, max_loss, tuple(rules)
         self.max_trial = max_trial                     # dollars the trial rules may hold unsettled, apart from max_exposure
+        self.max_underdog = max_underdog               # the same for the underdog rule alone
         if not config.KALSHI_API_KEY or not config.KALSHI_PRIVATE_KEY_PATH:
             raise BrokerError("Set KALSHI_API_KEY and KALSHI_PRIVATE_KEY_PATH in .env for live orders.")
         self.signer = KalshiClient(config.KALSHI_API_KEY, config.KALSHI_PRIVATE_KEY_PATH, demo=False)

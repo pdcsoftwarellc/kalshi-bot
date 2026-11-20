@@ -103,9 +103,9 @@ place an order.
 | College basketball dip | The three tennis dip bids on men's college games | The 80¢ bid only |
 | Women's college basketball dip | The same three bids on women's college games | The 80¢ bid only |
 | NBA and college volleyball dips | The same three bids on NBA pre-game favourites and women's college volleyball | No |
-| College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | Yes, trial budget |
+| College basketball underdog | Buy a men's college underdog priced 35–50¢ at the ask within ten minutes of the start | Yes, its own trial budget |
 | Ladder and just-in-time rows | For every dip family: bids at 75¢, 70¢ and 60¢, and the 80¢ bid placed only once the ask falls to 88¢. `report` also shows the 80¢ bid's return at 300 contracts with fills limited to the first 20 minutes | The just-in-time bid only, in men's college basketball and first-round qualifying tennis, as a second order beside the resting one |
-| Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | Yes, trial budget |
+| Nightly basket | Buy every 90¢+ basketball favourite at the ask within ten minutes of the start | No |
 
 Main-draw matches, ATP main tour, WTA Challenger and NBA leads under 6 are simulated and
 reported as separate rows.
@@ -140,7 +140,8 @@ already on the exchange stay there until the match ends or they are cancelled by
   It places the same pair on Netflix chart and reality TV markets (`wide_no`,
   `wide_mirror`); the NO bid is real under the same limits, the mirror never is.
 - Trial rules are unproven rules trading real money at the smallest size. They have their own
-  cap (`--max-trial-exposure 20`), so they cannot use the cash of the proven rules.
+  cap (`--max-trial-exposure 20`), so they cannot use the cash of the proven rules. The underdog
+  rule fires on many games a night, so it has a cap of its own (`--max-underdog-exposure 20`).
 - `report` also shows the weekly pre-game gap of every 90¢+ favourite the trader priced (the
   mispricing the dip rules depend on) and how many contracts sat ahead of each real bid.
 - `research/live_games.py --every 15 --hours 336` records Kalshi's live scores beside both
